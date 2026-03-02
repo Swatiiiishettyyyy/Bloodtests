@@ -2,6 +2,8 @@ from typing import List, Optional
 from pydantic import BaseModel, Field, validator
 from datetime import datetime
 
+from Login_module.Utils.phone_validation import validate_indian_mobile
+
 
 class ConsentRecordRequest(BaseModel):
     """Request schema for recording consent (for product pages)"""
@@ -159,7 +161,7 @@ class PartnerConsentRequestRequest(BaseModel):
     def validate_partner_mobile(cls, v):
         if not v:
             raise ValueError('partner_mobile is required')
-        return v
+        return validate_indian_mobile(v)
     
     @validator('product_id')
     def validate_product_id(cls, v):
@@ -182,6 +184,12 @@ class PartnerVerifyOTPRequest(BaseModel):
     request_id: str = Field(..., description="Request ID from partner consent request")
     partner_mobile: str = Field(..., description="Partner's mobile number")
     otp: str = Field(..., description="OTP received by partner", min_length=4, max_length=4)
+    
+    @validator('partner_mobile')
+    def validate_partner_mobile(cls, v):
+        if not v:
+            raise ValueError('partner_mobile is required')
+        return validate_indian_mobile(v)
     
     @validator('otp')
     def validate_otp(cls, v):
@@ -228,7 +236,7 @@ class PartnerRevokeConsentRequest(BaseModel):
     def validate_partner_mobile(cls, v):
         if not v or len(v.strip()) == 0:
             raise ValueError('Partner mobile is required')
-        return v.strip()
+        return validate_indian_mobile(v.strip())
     
     @validator('otp')
     def validate_otp(cls, v):

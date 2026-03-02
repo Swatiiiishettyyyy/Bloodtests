@@ -2,6 +2,8 @@ from pydantic import BaseModel, Field, validator
 from typing import Optional
 import re
 
+from Login_module.Utils.phone_validation import validate_indian_mobile
+
 
 # Request schemas
 class SendOTPRequest(BaseModel):
@@ -17,9 +19,7 @@ class SendOTPRequest(BaseModel):
     
     @validator('mobile')
     def validate_mobile(cls, v):
-        if not re.match(r'^\d{10,15}$', v):
-            raise ValueError('Mobile number must be 10-15 digits')
-        return v
+        return validate_indian_mobile(v)
 
 
 class VerifyOTPRequest(BaseModel):
@@ -39,9 +39,7 @@ class VerifyOTPRequest(BaseModel):
     
     @validator('mobile')
     def validate_mobile(cls, v):
-        if not re.match(r'^\d{10,15}$', v):
-            raise ValueError('Mobile number must be 10-15 digits')
-        return v
+        return validate_indian_mobile(v)
     
     @validator('otp')
     def validate_otp(cls, v):

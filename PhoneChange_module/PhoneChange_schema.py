@@ -6,6 +6,8 @@ from typing import Optional
 import re
 from datetime import datetime
 
+from Login_module.Utils.phone_validation import validate_indian_mobile
+
 
 class VerifyOldNumberRequest(BaseModel):
     """Request to verify old/current phone number"""
@@ -13,11 +15,7 @@ class VerifyOldNumberRequest(BaseModel):
     
     @validator('old_phone')
     def validate_phone(cls, v):
-        # Normalize phone number (remove spaces, dashes)
-        v = re.sub(r'[\s\-]', '', v)
-        if not re.match(r'^\d{10,15}$', v):
-            raise ValueError('Phone number must be 10-15 digits')
-        return v
+        return validate_indian_mobile(v)
 
 
 class VerifyOldNumberResponse(BaseModel):
@@ -57,11 +55,7 @@ class VerifyNewNumberRequest(BaseModel):
     
     @validator('new_phone')
     def validate_phone(cls, v):
-        # Normalize phone number (remove spaces, dashes)
-        v = re.sub(r'[\s\-]', '', v)
-        if not re.match(r'^\d{10,15}$', v):
-            raise ValueError('Phone number must be 10-15 digits')
-        return v
+        return validate_indian_mobile(v)
 
 
 class VerifyNewNumberResponse(BaseModel):

@@ -440,10 +440,14 @@ def _format_validation_errors(exc):
         loc = err.get("loc", [])
         source = loc[0] if loc else "body"
         field = loc[-1] if len(loc) > 1 else loc[0] if loc else None
+        msg = err.get("msg")
+        # Strip "Value error, " prefix from Pydantic validator messages
+        if msg and isinstance(msg, str) and msg.startswith("Value error, "):
+            msg = msg[len("Value error, "):].strip()
         detail_list.append({
             "source": source,
             "field": field,
-            "message": err.get("msg"),
+            "message": msg,
             "type": err.get("type")
         })
     return detail_list
