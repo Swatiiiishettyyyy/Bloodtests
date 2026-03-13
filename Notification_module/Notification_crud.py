@@ -142,9 +142,12 @@ def send_notification_to_user(
         from . import firebase_service
         tokens = get_device_tokens_for_user(db, user_id)
         firebase_service.init_firebase()
+        print(f"[FCM DEBUG] tokens={tokens} firebase_initialized={firebase_service.firebase_initialized}", flush=True)
         if not tokens:
+            print(f"[FCM DEBUG] Skipping FCM: no device tokens for user_id={user_id}", flush=True)
             logger.error("Skipping FCM: no device tokens for user_id=%s", user_id)
         elif not firebase_service.firebase_initialized:
+            print(f"[FCM DEBUG] Skipping FCM: Firebase not initialized for user_id={user_id}", flush=True)
             logger.error("Skipping FCM: Firebase not initialized")
         else:
             data = {"notification_id": str(notification.id), "type": type or ""}
