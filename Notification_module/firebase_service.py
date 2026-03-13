@@ -128,6 +128,7 @@ def send_fcm_to_tokens(
     )
     try:
         batch = messaging.send_each_for_multicast(message)
+        print(f"[FCM DEBUG] batch result: success={batch.success_count} failure={batch.failure_count} total={len(tokens)}", flush=True)
         logger.info(
             "FCM batch: success_count=%s failure_count=%s total=%s",
             batch.success_count,
@@ -140,6 +141,7 @@ def send_fcm_to_tokens(
             for i, send_response in enumerate(batch.responses):
                 if not send_response.success:
                     exc = getattr(send_response, "exception", None)
+                    print(f"[FCM DEBUG] token[{i}] failed: {getattr(exc, 'message', exc)}", flush=True)
                     logger.warning(
                         "FCM send failed for token index %s: %s",
                         i,
