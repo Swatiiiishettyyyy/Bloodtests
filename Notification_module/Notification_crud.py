@@ -128,7 +128,13 @@ def send_notification_to_user(
     try:
         notification = create_notification(db, user_id=user_id, title=title, message=message, type=type)
         user = db.query(User).filter(User.id == user_id).first()
-        if user and not getattr(user, "notifications_enabled", True):
+        notifications_enabled_val = getattr(user, "notifications_enabled", True)
+        logger.info(
+            "send_notification_to_user: user_id=%s notifications_enabled=%r (type=%s)",
+            user_id, notifications_enabled_val, type(notifications_enabled_val).__name__
+        )
+        if user and not notifications_enabled_val:
+            logger.info("Skipping FCM: notifications_enabled is falsy for user_id=%s", user_id)
             return
         from . import firebase_service
         tokens = get_device_tokens_for_user(db, user_id)
