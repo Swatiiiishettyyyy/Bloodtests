@@ -4,6 +4,7 @@ Refresh Token Model - Stores refresh tokens with token family tracking for rotat
 from sqlalchemy import Column, String, Integer, DateTime, Boolean, ForeignKey, func, Text
 from sqlalchemy.orm import relationship
 from database import Base
+from Login_module.Utils.datetime_utils import now_ist
 import uuid
 
 
@@ -21,7 +22,7 @@ class RefreshToken(Base):
     token_hash = Column(String(64), nullable=False, index=True)  # SHA256 hash of refresh token
     expires_at = Column(DateTime(timezone=True), nullable=False, index=True)
     is_revoked = Column(Boolean, default=False, nullable=False, index=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), default=now_ist, nullable=False, index=True)
     revoked_at = Column(DateTime(timezone=True), nullable=True)
     ip_address = Column(String(50), nullable=True, index=True)
     user_agent = Column(Text, nullable=True)

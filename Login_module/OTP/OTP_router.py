@@ -471,19 +471,6 @@ def verify_otp(req: VerifyOTPRequest, request: Request, db: Session = Depends(ge
             f"Access Token contains: user_id={access_token_data.get('sub')}, session_id={access_token_data.get('session_id')}"
         )
         
-        # Send "Login successful" notification (non-blocking; login must not fail if notification fails)
-        try:
-            from Notification_module.Notification_crud import send_notification_to_user
-            send_notification_to_user(
-                db,
-                user_id=user.id,
-                title="Login successful",
-                message="You have logged in successfully.",
-                type="info",
-            )
-        except Exception as notif_err:
-            logger.warning("Login successful notification send failed (user_id=%s): %s", user.id, notif_err)
-        
         # Prepare response data based on platform
         if is_web:
             # Web: Set cookies, return user info and CSRF token in body (NO tokens in JSON)

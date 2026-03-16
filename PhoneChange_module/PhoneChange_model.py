@@ -4,6 +4,7 @@ Phone Change Request Models
 from sqlalchemy import Column, Integer, String, DateTime, Text, ForeignKey, JSON, func, Index
 from sqlalchemy.orm import relationship
 from database import Base
+from Login_module.Utils.datetime_utils import now_ist
 import enum
 
 
@@ -49,7 +50,7 @@ class PhoneChangeRequest(Base):
     sms_retry_count = Column(Integer, default=0, nullable=False)
     
     # Timestamps
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), default=now_ist, nullable=False, index=True)
     expires_at = Column(DateTime(timezone=True), nullable=True, index=True)  # Overall request expiry
     old_phone_verified_at = Column(DateTime(timezone=True), nullable=True)  # When old number was verified
     new_phone_verified_at = Column(DateTime(timezone=True), nullable=True)  # When new number was verified
@@ -87,7 +88,7 @@ class PhoneChangeAuditLog(Base):
     
     # Request metadata
     ip_address = Column(String(50), nullable=True, index=True)
-    timestamp = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
+    timestamp = Column(DateTime(timezone=True), default=now_ist, nullable=False, index=True)
     
     # Success/failure tracking
     success = Column(Integer, nullable=False, default=1)  # 1 for success, 0 for failure

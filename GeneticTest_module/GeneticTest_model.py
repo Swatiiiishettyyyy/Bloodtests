@@ -4,6 +4,7 @@ Genetic Test Participant model - tracks users who have taken genetic tests.
 from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, func, Boolean
 from sqlalchemy.orm import relationship
 from database import Base
+from Login_module.Utils.datetime_utils import now_ist
 
 
 class GeneticTestParticipant(Base):
@@ -33,8 +34,8 @@ class GeneticTestParticipant(Base):
     order_id = Column(Integer, ForeignKey("orders.id", ondelete="SET NULL"), nullable=True, index=True)
     
     # Timestamps
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now(), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=now_ist, nullable=False, index=True)
+    updated_at = Column(DateTime(timezone=True), onupdate=now_ist, nullable=True)
     
     # Relationships
     user = relationship("User")

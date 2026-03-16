@@ -1,5 +1,6 @@
 from sqlalchemy import Column, Integer, String, DateTime, func, Text, ForeignKey
 from database import Base
+from Login_module.Utils.datetime_utils import now_ist
 
 
 class OTPAuditLog(Base):
@@ -13,7 +14,7 @@ class OTPAuditLog(Base):
     user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
     device_id = Column(String(255), nullable=True, index=True)
     event_type = Column(String(20), nullable=False, index=True)  # GENERATED, VERIFIED, FAILED, BLOCKED
-    timestamp = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
+    timestamp = Column(DateTime(timezone=True), default=now_ist, nullable=False, index=True)
     reason = Column(Text, nullable=True)  # Optional reason or failed attempt count
     phone_number = Column(String(30), nullable=True, index=True)  # For backward compatibility
     ip_address = Column(String(50), nullable=True, index=True)  # IP address of request

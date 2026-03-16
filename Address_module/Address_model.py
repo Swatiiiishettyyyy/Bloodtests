@@ -1,6 +1,7 @@
 # app/models/address.py
 from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, DateTime, func
 from database import Base
+from Login_module.Utils.datetime_utils import now_ist
 
 class Address(Base):
     __tablename__ = "addresses"
@@ -25,8 +26,8 @@ class Address(Base):
     is_deleted = Column(Boolean, nullable=False, default=False, index=True)
     deleted_at = Column(DateTime(timezone=True), nullable=True)
 
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    created_at = Column(DateTime(timezone=True), default=now_ist)
+    updated_at = Column(DateTime(timezone=True), onupdate=now_ist)
 
 
 class ServiceableLocation(Base):
@@ -34,4 +35,4 @@ class ServiceableLocation(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     location = Column(String(150), nullable=False, unique=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    created_at = Column(DateTime(timezone=True), default=now_ist)

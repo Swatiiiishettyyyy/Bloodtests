@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from database import Base
 from typing import Optional
 import json
+from Login_module.Utils.datetime_utils import now_ist
 
 
 class ProfileAuditLog(Base):
@@ -16,7 +17,7 @@ class ProfileAuditLog(Base):
     ip_address = Column(String(50), nullable=True, index=True)
     user_agent = Column(String(500), nullable=True)
     correlation_id = Column(String(100), nullable=True, index=True)  # For request tracing
-    timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+    timestamp = Column(DateTime(timezone=True), default=now_ist, index=True)
 
 
 def log_profile_update(

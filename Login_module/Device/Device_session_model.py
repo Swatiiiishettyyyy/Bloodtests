@@ -1,6 +1,7 @@
 from sqlalchemy import Column, Integer, String, DateTime, Boolean, ForeignKey, func, Text
 from sqlalchemy.orm import relationship
 from database import Base
+from Login_module.Utils.datetime_utils import now_ist
 
 class DeviceSession(Base):
     __tablename__ = "device_sessions"
@@ -12,8 +13,8 @@ class DeviceSession(Base):
     device_platform = Column(String(50), nullable=True)           # web / mobile / ios / android etc
     ip_address = Column(String(50), nullable=True)
     browser_info = Column(Text, nullable=True)                    # browser/user agent info
-    last_active = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False, index=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
+    last_active = Column(DateTime(timezone=True), default=now_ist, onupdate=now_ist, nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), default=now_ist, nullable=False, index=True)
     event_on_logout = Column(DateTime(timezone=True), nullable=True)  # timestamp when logged out
     is_active = Column(Boolean, default=True, nullable=False, index=True)
     

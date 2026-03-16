@@ -4,6 +4,7 @@ Enquiry / test request model - stores requests for tests (name, contact, email, 
 from sqlalchemy import Column, Integer, String, Text, DateTime, func
 
 from database import Base
+from Login_module.Utils.datetime_utils import now_ist
 
 
 class EnquiryRequest(Base):
@@ -21,4 +22,4 @@ class EnquiryRequest(Base):
     number_of_tests = Column(Integer, nullable=False)
     organization = Column(String(255), nullable=True)
     notes = Column(Text, nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), default=now_ist, nullable=False, index=True)

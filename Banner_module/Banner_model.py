@@ -1,6 +1,7 @@
 from sqlalchemy import Column, Integer, String, DateTime, Boolean, func, JSON
 from sqlalchemy.orm import relationship
 from database import Base
+from Login_module.Utils.datetime_utils import now_ist
 
 
 class Banner(Base):
@@ -29,6 +30,6 @@ class Banner(Base):
     deleted_at = Column(DateTime(timezone=True), nullable=True)
     
     # Timestamps
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now(), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=now_ist, nullable=False)
+    updated_at = Column(DateTime(timezone=True), onupdate=now_ist, nullable=True)
 

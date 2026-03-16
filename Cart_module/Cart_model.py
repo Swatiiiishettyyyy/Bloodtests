@@ -1,6 +1,7 @@
 from sqlalchemy import Column, Integer, ForeignKey, DateTime, func, String, Boolean, UniqueConstraint
 from sqlalchemy.orm import relationship
 from database import Base
+from Login_module.Utils.datetime_utils import now_ist
 
 
 class Cart(Base):
@@ -17,8 +18,8 @@ class Cart(Base):
     is_active = Column(Boolean, nullable=False, default=True, index=True)
     
     # Timestamps
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    created_at = Column(DateTime(timezone=True), default=now_ist, nullable=False)
+    updated_at = Column(DateTime(timezone=True), onupdate=now_ist)
     last_activity_at = Column(DateTime(timezone=True), nullable=True)  # Last time any item was added/removed
     
     # Relationships
@@ -51,8 +52,8 @@ class CartItem(Base):
     # Note: Coupon tracking is handled by cart_coupons table, not in cart_items
     # This keeps cart items clean and coupons are managed at cart level
     
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    created_at = Column(DateTime(timezone=True), default=now_ist)
+    updated_at = Column(DateTime(timezone=True), onupdate=now_ist)
 
     # Relationships
     cart = relationship("Cart", back_populates="items")

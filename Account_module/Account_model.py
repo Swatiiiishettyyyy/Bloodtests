@@ -6,6 +6,7 @@ from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, func
 from sqlalchemy.orm import relationship
 
 from database import Base
+from Login_module.Utils.datetime_utils import now_ist
 
 
 class AccountFeedbackRequest(Base):
@@ -34,7 +35,7 @@ class AccountFeedbackRequest(Base):
     reason = Column(Text, nullable=False)
 
     # When the request was submitted
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), default=now_ist, nullable=False, index=True)
 
     # Relationships (optional, for convenience)
     user = relationship("User")

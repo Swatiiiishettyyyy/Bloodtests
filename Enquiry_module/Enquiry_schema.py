@@ -1,8 +1,9 @@
 """
 Pydantic schemas for enquiry / test request form.
 """
-from pydantic import BaseModel, Field, EmailStr
+from pydantic import BaseModel, Field, EmailStr, validator
 from typing import Optional
+from Login_module.Utils.phone_validation import validate_indian_mobile
 
 
 class EnquiryRequestCreate(BaseModel):
@@ -14,6 +15,11 @@ class EnquiryRequestCreate(BaseModel):
     email: EmailStr = Field(..., description="Email address")
     number_of_tests: int = Field(..., ge=1, description="Number of tests required")
     notes: Optional[str] = Field(None, description="Notes (optional)")
+
+    @validator("contact_number")
+    def validate_contact_number(cls, v: str) -> str:
+        # Reuse Indian mobile validation so enquiry contact numbers are valid 10-digit mobiles
+        return validate_indian_mobile(v)
 
     class Config:
         json_schema_extra = {

@@ -4,6 +4,7 @@ Tracking Model - Database schema for tracking_records table
 from sqlalchemy import Column, String, Boolean, DECIMAL, Float, Text, DateTime, func, Index
 from sqlalchemy.dialects.postgresql import UUID, INET
 from database import Base
+from Login_module.Utils.datetime_utils import now_ist
 import uuid
 
 
@@ -55,7 +56,7 @@ class TrackingRecord(Base):
     record_type = Column(String(50), nullable=True)  # 'consent_update', 'location_update', 'page_view'
 
     # Timestamps (ALWAYS populated)
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=now_ist, nullable=False)
     consent_updated_at = Column(DateTime(timezone=True), nullable=True)
 
     # Indexes for performance

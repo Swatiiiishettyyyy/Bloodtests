@@ -4,6 +4,7 @@ Coupon model for managing discount coupons.
 from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, func, Enum, ForeignKey
 from sqlalchemy.orm import relationship
 from database import Base
+from Login_module.Utils.datetime_utils import now_ist
 import enum
 
 
@@ -55,8 +56,8 @@ class Coupon(Base):
     status = Column(Enum(CouponStatus), nullable=False, default=CouponStatus.ACTIVE, index=True)
     
     # Timestamps
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    created_at = Column(DateTime(timezone=True), default=now_ist, nullable=False)
+    updated_at = Column(DateTime(timezone=True), onupdate=now_ist)
     
     # Relationships
     cart_applications = relationship("CartCoupon", back_populates="coupon", cascade="all, delete-orphan")
@@ -79,7 +80,7 @@ class CartCoupon(Base):
     
     # Cart reference (can be null if coupon is applied but cart is cleared)
     # We track by user_id and coupon_code for flexibility
-    applied_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    applied_at = Column(DateTime(timezone=True), default=now_ist, nullable=False)
     
     # Relationships
     coupon = relationship("Coupon", back_populates="cart_applications")

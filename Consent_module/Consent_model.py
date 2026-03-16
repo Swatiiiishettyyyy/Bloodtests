@@ -1,6 +1,7 @@
 from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, func, Index, Text
 from sqlalchemy.orm import relationship
 from database import Base
+from Login_module.Utils.datetime_utils import now_ist
 
 
 class ConsentProduct(Base):
@@ -8,7 +9,7 @@ class ConsentProduct(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(100), nullable=False, unique=True, index=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=now_ist, nullable=False)
 
     # Relationship
     consents = relationship("UserConsent", back_populates="consent_product")
@@ -26,8 +27,8 @@ class UserConsent(Base):
     consent_given = Column(Integer, nullable=False, default=1)  # 1 for yes, only store yes consents
     consent_source = Column(String(20), nullable=False)  # "login" or "product"
     status = Column(String(10), nullable=False, default="yes")  # "yes" or "no"
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now(), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=now_ist, nullable=False)
+    updated_at = Column(DateTime(timezone=True), onupdate=now_ist, nullable=True)
 
     # Relationships
     user = relationship("User", foreign_keys=[user_id])
@@ -93,8 +94,8 @@ class PartnerConsent(Base):
     
     # Metadata
     consent_source = Column(String(20), nullable=False, default="product")  # "product" or "partner_otp"
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now(), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=now_ist, nullable=False)
+    updated_at = Column(DateTime(timezone=True), onupdate=now_ist, nullable=True)
     
     # Relationships
     user = relationship("User", foreign_keys=[user_id])

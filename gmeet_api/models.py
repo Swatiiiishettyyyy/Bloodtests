@@ -7,6 +7,7 @@ from pathlib import Path
 from sqlalchemy import Column, Integer, String, DateTime, Text, Boolean, JSON, ForeignKey
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
+from Login_module.Utils.datetime_utils import now_ist
 
 # Add parent directory to path to import shared database
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -40,8 +41,8 @@ class CounsellorToken(Base):
     client_secret = Column(String(500), nullable=True)
     scopes = Column(JSON, nullable=True)  # Store as JSON array
     expires_at = Column(DateTime(timezone=True), nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    created_at = Column(DateTime(timezone=True), default=now_ist)
+    updated_at = Column(DateTime(timezone=True), default=now_ist, onupdate=now_ist)
     is_active = Column(Boolean, default=True)
 
     # Relationships
@@ -67,8 +68,8 @@ class CounsellorBooking(Base):
     meet_link = Column(Text, nullable=True)
     calendar_link = Column(Text, nullable=True)
     status = Column(String(50), default="confirmed", index=True)  # confirmed, cancelled, completed
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    created_at = Column(DateTime(timezone=True), default=now_ist)
+    updated_at = Column(DateTime(timezone=True), default=now_ist, onupdate=now_ist)
 
     # Relationships
     counsellor_token = relationship("CounsellorToken", back_populates="bookings")
@@ -91,7 +92,7 @@ class CounsellorActivityLog(Base):
     error_message = Column(Text, nullable=True)
     ip_address = Column(String(50), nullable=True)
     user_agent = Column(String(500), nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+    created_at = Column(DateTime(timezone=True), default=now_ist, index=True)
 
     # Relationships
     booking = relationship("CounsellorBooking", back_populates="logs")
@@ -116,6 +117,6 @@ class CounsellorGmeetList(Base):
     profile_picture_url = Column(String(500), nullable=True)  # Google profile picture URL
     locale = Column(String(10), nullable=True)  # User's language/region preference (e.g., "en", "en-IN")
     is_active = Column(Boolean, default=True, index=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    created_at = Column(DateTime(timezone=True), default=now_ist)
+    updated_at = Column(DateTime(timezone=True), default=now_ist, onupdate=now_ist)
 
