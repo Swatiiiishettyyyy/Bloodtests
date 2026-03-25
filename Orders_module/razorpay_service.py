@@ -206,10 +206,12 @@ def create_razorpay_invoice_for_order(
     https://www.postman.com/razorpaydev/razorpay-public-workspace/request/llu74wr/create-an-invoice-with-customer-id?tab=body
     """
     try:
+        import time as _time
         amount_in_paise = int(total_amount * 100)
 
         invoice_data: Dict[str, Any] = {
             "type": "invoice",
+            "date": int(_time.time()),  # Required by Razorpay: Unix timestamp of invoice date
             "customer_id": customer_id,
             "currency": currency,
             "line_items": [
@@ -220,7 +222,6 @@ def create_razorpay_invoice_for_order(
                     "quantity": 1,
                 }
             ],
-            "receipt": order_number,
             # We only create the invoice now; email/SMS sending can be enabled later
             "sms_notify": 0,
             "email_notify": 0,

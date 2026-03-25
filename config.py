@@ -82,11 +82,10 @@ class Settings(BaseSettings):
     THYROCARE_PAY_TYPE: str = "POSTPAID"
 
     model_config = ConfigDict(
-        # Use absolute path to make sure .env is found
-        env_file=os.path.join(os.path.dirname(__file__), "..", ".env"),
+        env_file=os.path.join(os.path.dirname(__file__), ".env"),
         env_file_encoding="utf-8",
-        # Allow case-insensitive environment variable names
-        case_sensitive=False
+        case_sensitive=False,
+        extra="ignore"  # Ignore extra env vars not defined in Settings
     )
 
 # Create the settings instance

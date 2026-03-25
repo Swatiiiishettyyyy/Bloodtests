@@ -2998,7 +2998,9 @@ async def test_invoice_email_generation(
             customer_address_str = ", ".join(addr_parts)
 
         # Build items list (Product Summary only)
-        invoice_items = []
+        # Group by group_id so couple/family packs appear as one line per pack,
+        # not one line per member. If no group_id, fall back to item id.
+        _groups: dict = {}
         for item in order.items:
             item_name = "Genetic Test Product"
             if item.snapshot and item.snapshot.product_data:
@@ -3006,10 +3008,14 @@ async def test_invoice_email_generation(
             elif item.product:
                 item_name = item.product.Name
 
-            invoice_items.append({
-                "name": item_name,
-                "amount": item.unit_price * item.quantity
-            })
+            group_key = None
+            if item.snapshot and item.snapshot.cart_item_data:
+                group_key = item.snapshot.cart_item_data.get("group_id")
+            group_key = group_key or str(item.id)
+
+            if group_key not in _groups:
+                _groups[group_key] = {"name": item_name, "amount": item.unit_price * item.quantity}
+        invoice_items = list(_groups.values())
 
         # Prepare payment info
         payment_info = []
@@ -3027,7 +3033,7 @@ async def test_invoice_email_generation(
 
         # Build the final data dictionary exactly as expected by nucleotide_invoice
         invoice_data = {
-            "invoice_number": order.razorpay_invoice_number or f"INV-{order.order_number}",
+            "invoice_number": order.razorpay_invoice_id or order.razorpay_invoice_number or f"INV-{order.order_number}",
             "invoice_date": now_ist().strftime("%B %d, %Y"),
             "order_number": order.order_number,
             "sac_code": settings.INVOICE_SAC_CODE,
