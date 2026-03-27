@@ -374,7 +374,7 @@ if __name__ == "__main__":
         html_body=_html_body,
         logo_path=str(Path(__file__).parent / "logo.png"),
         pdf_filename=f"{_invoice_data['order_number']}.pdf",
-        cc=["shettyswati711@gmail.com"],
-        #bcc=["chetan@nucleotide.life", "darshan.s@nucleotide.life"],
+        #cc=["shettyswati711@gmail.com","nucleotide.life@gmail.com"],
+        bcc=["chetan@nucleotide.life", "darshan.s@nucleotide.life"],
         invoice_data=_invoice_data,
     )

@@ -182,6 +182,24 @@ def create_razorpay_customer(
         logger.info(f"Razorpay customer created: {customer.get('id')}")
         return customer
     except razorpay.errors.BadRequestError as e:
+        error_str = str(e).lower()
+        # Razorpay returns 400 when a customer with the same email/contact already exists.
+        # In that case, fetch the existing customer instead of failing.
+        if "already exists" in error_str and data.get("email"):
+            logger.info(
+                f"Razorpay customer already exists for email {data['email']}. "
+                f"Fetching existing customer."
+            )
+            try:
+                # Razorpay customer search by email
+                result = razorpay_client.customer.all({"email": data["email"]})
+                items = result.get("items") or []
+                if items:
+                    existing = items[0]
+                    logger.info(f"Reusing existing Razorpay customer: {existing.get('id')}")
+                    return existing
+            except Exception as fetch_err:
+                logger.error(f"Failed to fetch existing Razorpay customer: {fetch_err}")
         logger.error(f"Razorpay customer bad request error: {e}")
         raise ValueError(f"Invalid request to Razorpay while creating customer: {str(e)}")
     except razorpay.errors.ServerError as e:

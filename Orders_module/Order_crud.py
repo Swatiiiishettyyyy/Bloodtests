@@ -17,6 +17,7 @@ from Cart_module.coupon_service import get_applied_coupon, validate_and_calculat
 from Product_module.Product_model import Product
 from Member_module.Member_model import Member
 from Address_module.Address_model import Address
+from config import settings
 import logging
 
 logger = logging.getLogger(__name__)
@@ -1120,6 +1121,11 @@ def confirm_order_from_webhook(
                 f"Invoice will not be created."
             )
         else:
+            # Persist customer_id immediately so retry-invoice endpoint can work
+            # even if invoice creation fails below
+            order.razorpay_customer_id = customer_id
+            db.flush()
+
             # Log invoice creation attempt
             logger.info(f"Creating Razorpay invoice for order {order.order_number} with customer_id={customer_id}, amount={order.total_amount}")
 
@@ -1258,6 +1264,7 @@ def confirm_order_from_webhook(
             logo_path = None
             
         # Send the invoice email
+        invoice_bcc = [e.strip() for e in settings.INVOICE_BCC_EMAILS.split(",") if e.strip()] or None
         generate_and_send_invoice(
             invoice_data=invoice_data,
             logo_path=logo_path,
@@ -1267,7 +1274,8 @@ def confirm_order_from_webhook(
             html_body=html_body,
             pdf_filename=f"Invoice-{order.order_number}.pdf",
             service_account_file=str(project_root / settings.INVOICE_SERVICE_ACCOUNT_PATH),
-            sender_email=settings.INVOICE_SENDER_EMAIL
+            sender_email=settings.INVOICE_SENDER_EMAIL,
+            bcc=invoice_bcc
         )
         logger.info(f"Custom branded PDF invoice sent to {order.user.email} for order {order.order_number}")
 

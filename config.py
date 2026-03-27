@@ -70,6 +70,8 @@ class Settings(BaseSettings):
     INVOICE_CUSTOMER_CARE_EMAIL: str = "info@nucleotide.life"
     INVOICE_WEBSITE: str = "www.nucleotide.life"
     INVOICE_LOGO_PATH: str = "invoice generation/logo.png"
+    # Comma-separated BCC addresses for invoice emails, e.g. "a@x.com,b@x.com"
+    INVOICE_BCC_EMAILS: str = ""
 
     # Thyrocare Configuration
     THYROCARE_BASE_URL: str = "https://api-sandbox.thyrocare.com"
