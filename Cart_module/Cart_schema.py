@@ -1,11 +1,31 @@
 from pydantic import BaseModel, Field, validator
 from typing import Optional, List, Union, Dict
-from datetime import datetime
+from datetime import datetime, date
 
 class MemberAddressMapping(BaseModel):
     """Mapping of member to address"""
     member_id: int = Field(..., description="Member ID", gt=0)
     address_id: int = Field(..., description="Address ID for this member", gt=0)
+
+
+class BloodTestMemberMapping(BaseModel):
+    """Each member for a blood test shares the same address (home collection)"""
+    member_id: int = Field(..., description="Member ID", gt=0)
+
+
+class BloodTestCartAdd(BaseModel):
+    thyrocare_product_id: int = Field(..., description="ThyrocareProduct.id to add to cart", gt=0)
+    address_id: int = Field(..., description="Home collection address ID", gt=0)
+    members: List[BloodTestMemberMapping] = Field(..., description="Members to test (1 to beneficiaries_max)", min_items=1)
+    appointment_date: Optional[date] = Field(None, description="Preferred appointment date (YYYY-MM-DD)")
+    appointment_start_time: Optional[str] = Field(None, description="Preferred time slot e.g. '09:00'")
+
+    @validator("members")
+    def no_duplicate_members(cls, v):
+        ids = [m.member_id for m in v]
+        if len(ids) != len(set(ids)):
+            raise ValueError("Duplicate members are not allowed.")
+        return v
 
 class CartAdd(BaseModel):
     product_id: int = Field(..., description="Product ID to add to cart", gt=0)

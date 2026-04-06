@@ -18,10 +18,16 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "users",
-        sa.Column("notifications_enabled", sa.Boolean(), nullable=False, server_default=sa.true()),
-    )
+    bind = op.get_bind()
+    result = bind.execute(sa.text(
+        "SELECT COUNT(*) FROM information_schema.columns "
+        "WHERE table_name='users' AND column_name='notifications_enabled'"
+    ))
+    if result.scalar() == 0:
+        op.add_column(
+            "users",
+            sa.Column("notifications_enabled", sa.Boolean(), nullable=False, server_default=sa.true()),
+        )
 
 
 def downgrade() -> None:

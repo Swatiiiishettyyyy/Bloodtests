@@ -797,6 +797,14 @@ async def razorpay_webhook(
                 
                 # Commit the savepoint (status changes are now permanent)
                 savepoint.commit()
+
+                # Book Thyrocare order for any blood test items (non-blocking)
+                try:
+                    from Thyrocare_module.thyrocare_booking_service import book_thyrocare_for_order
+                    book_thyrocare_for_order(db, order)
+                except Exception as thyrocare_err:
+                    logger.error(f"Thyrocare booking failed for order {order.order_number}: {thyrocare_err}")
+                    # Do NOT fail the webhook — payment is confirmed, Thyrocare booking can be retried
                 
                 # Update webhook log as processed
                 webhook_log.processed = True

@@ -14,7 +14,8 @@ from Product_module.Product_model import Product, PlanType
 from Address_module.Address_model import Address
 from Member_module.Member_model import Member
 from Login_module.User.user_model import User
-from .Cart_schema import CartAdd, CartUpdate, ApplyCouponRequest, CouponCreate, AllowlistAddRequest, AllowlistRemoveRequest, AllowlistEntryResponse
+from Thyrocare_module.Thyrocare_model import ThyrocareProduct
+from .Cart_schema import CartAdd, CartUpdate, ApplyCouponRequest, CouponCreate, AllowlistAddRequest, AllowlistRemoveRequest, AllowlistEntryResponse, BloodTestCartAdd
 from deps import get_db
 from Login_module.Utils.auth_user import get_current_user, get_current_member
 from Login_module.Utils.datetime_utils import to_ist_isoformat
@@ -373,6 +374,164 @@ def add_to_cart(
         raise HTTPException(status_code=500, detail="We couldn't add items to your cart. Please try again.")
 
 
+@router.post("/add-blood-test")
+def add_blood_test_to_cart(
+    item: BloodTestCartAdd,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Add a Thyrocare blood test product to cart.
+    All members share the same address (home collection).
+    Creates one CartItem row per member, all linked by group_id.
+    """
+    try:
+        from .Cart_model import ProductType as PT
+
+        # Validate thyrocare product
+        thyrocare_product = db.query(ThyrocareProduct).filter(
+            ThyrocareProduct.id == item.thyrocare_product_id,
+            ThyrocareProduct.is_deleted == False,
+            ThyrocareProduct.is_active == True
+        ).first()
+        if not thyrocare_product:
+            raise HTTPException(status_code=404, detail="Blood test product not found.")
+
+        member_ids = [m.member_id for m in item.members]
+        num_members = len(member_ids)
+
+        # Validate beneficiary count
+        if num_members < thyrocare_product.beneficiaries_min:
+            raise HTTPException(
+                status_code=422,
+                detail=f"This test requires at least {thyrocare_product.beneficiaries_min} member(s). You selected {num_members}."
+            )
+        if num_members > thyrocare_product.beneficiaries_max:
+            raise HTTPException(
+                status_code=422,
+                detail=f"This test allows at most {thyrocare_product.beneficiaries_max} member(s). You selected {num_members}."
+            )
+
+        # Validate address belongs to user
+        address = db.query(Address).filter(
+            Address.id == item.address_id,
+            Address.user_id == current_user.id,
+            Address.is_deleted == False
+        ).first()
+        if not address:
+            raise HTTPException(status_code=422, detail="Address not found or doesn't belong to your account.")
+
+        # Validate members belong to user
+        members = db.query(Member).filter(
+            Member.id.in_(member_ids),
+            Member.user_id == current_user.id
+        ).all()
+        if len(members) != num_members:
+            raise HTTPException(status_code=422, detail="One or more members not found in your account.")
+
+        # Check if same thyrocare product + same members already in cart
+        existing = db.query(CartItem).filter(
+            CartItem.user_id == current_user.id,
+            CartItem.thyrocare_product_id == item.thyrocare_product_id,
+            CartItem.product_type == PT.BLOOD_TEST,
+            CartItem.is_deleted == False
+        ).all()
+        if existing:
+            from collections import defaultdict
+            grouped = defaultdict(list)
+            for ci in existing:
+                grouped[ci.group_id].append(ci)
+            requested_set = set(member_ids)
+            for grp_items in grouped.values():
+                if set(ci.member_id for ci in grp_items) == requested_set:
+                    raise HTTPException(
+                        status_code=422,
+                        detail="This blood test with the same members is already in your cart."
+                    )
+
+        ip, user_agent = get_client_info(request)
+        group_id = f"{current_user.id}_bt_{thyrocare_product.id}_{uuid.uuid4().hex}"
+        cart = get_or_create_user_cart(db, current_user.id)
+
+        created_items = []
+        try:
+            for member_id in member_ids:
+                cart_item = CartItem(
+                    user_id=current_user.id,
+                    cart_id=cart.id,
+                    product_type=PT.BLOOD_TEST,
+                    thyrocare_product_id=thyrocare_product.id,
+                    address_id=item.address_id,
+                    member_id=member_id,
+                    quantity=1,
+                    group_id=group_id,
+                    appointment_date=item.appointment_date,
+                    appointment_start_time=item.appointment_start_time,
+                )
+                db.add(cart_item)
+                created_items.append(cart_item)
+
+            from Login_module.Utils.datetime_utils import now_ist
+            cart.last_activity_at = now_ist()
+            db.flush()
+            db.commit()
+            for ci in created_items:
+                db.refresh(ci)
+        except Exception:
+            db.rollback()
+            raise HTTPException(status_code=500, detail="Something went wrong while adding the blood test to your cart.")
+
+        correlation_id = str(uuid.uuid4())
+        create_audit_log(
+            db=db,
+            user_id=current_user.id,
+            action="ADD",
+            entity_type="CART_ITEM",
+            entity_id=created_items[0].id,
+            cart_id=cart.id,
+            details={
+                "product_type": "blood_test",
+                "thyrocare_product_id": thyrocare_product.id,
+                "thyrocare_id": thyrocare_product.thyrocare_id,
+                "member_ids": member_ids,
+                "address_id": item.address_id,
+                "group_id": group_id,
+                "cart_items_created": len(created_items),
+            },
+            ip_address=ip,
+            user_agent=user_agent,
+            username=current_user.name or current_user.mobile,
+            correlation_id=correlation_id
+        )
+
+        return {
+            "status": "success",
+            "message": "Blood test added to cart successfully.",
+            "data": {
+                "cart_item_ids": [ci.id for ci in created_items],
+                "cart_id": cart.id,
+                "thyrocare_product_id": thyrocare_product.id,
+                "thyrocare_id": thyrocare_product.thyrocare_id,
+                "product_name": thyrocare_product.name,
+                "address_id": item.address_id,
+                "member_ids": member_ids,
+                "members_count": num_members,
+                "price_per_member": thyrocare_product.selling_price,
+                "total_amount": thyrocare_product.selling_price * num_members,
+                "group_id": group_id,
+                "appointment_date": str(item.appointment_date) if item.appointment_date else None,
+                "appointment_start_time": item.appointment_start_time,
+            }
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="We couldn't add the blood test to your cart. Please try again.")
+
+
 @router.put("/update/{cart_item_id}")
 def update_cart_item(
     cart_item_id: int,
@@ -685,20 +844,21 @@ def view_cart(
         query = db.query(CartItem).options(
             joinedload(CartItem.member),
             joinedload(CartItem.address),
-            joinedload(CartItem.product)
+            joinedload(CartItem.product),
+            joinedload(CartItem.thyrocare_product)
         ).filter(
             CartItem.cart_id == cart.id,
-            CartItem.is_deleted == False  # Exclude deleted/cleared items
+            CartItem.is_deleted == False
         )
     else:
-        # Fallback for backward compatibility - query by user_id
         query = db.query(CartItem).options(
             joinedload(CartItem.member),
             joinedload(CartItem.address),
-            joinedload(CartItem.product)
+            joinedload(CartItem.product),
+            joinedload(CartItem.thyrocare_product)
         ).filter(
             CartItem.user_id == current_user.id,
-            CartItem.is_deleted == False  # Exclude deleted/cleared items
+            CartItem.is_deleted == False
         )
     
     all_cart_items = query.order_by(CartItem.group_id, CartItem.created_at).all()
@@ -757,36 +917,34 @@ def view_cart(
         # Skip if group is empty (should not happen, but safety check)
         if not items:
             continue
-            
-        # Use first item as representative (all items in group have same product, quantity)
-        # Note: addresses may differ per member
+
         item = items[0]
-        product = item.product
-        
-        # Skip if product is deleted or missing
-        if not product:
-            continue
-            
-        member_ids = [i.member_id for i in items]
-        
-        # Build member-address mapping with full details for this group
-        member_address_map = []
-        for i in items:
-            member = i.member
-            address = i.address
-            
-            member_details = {
-                "member_id": member.id if member else i.member_id,
-                "name": member.name if member else "Unknown",
-                "relation": str(member.relation) if member else None,  # Now a string, no need for .value check
-                "age": member.age if member else None,
-                "gender": member.gender if member else None,
-                "dob": to_ist_isoformat(member.dob) if member and member.dob else None,
-                "mobile": member.mobile if member else None
-            }
-            
+        raw_type = getattr(item, 'product_type', None)
+        is_blood_test = str(raw_type).lower() == "blood_test"
+
+        if is_blood_test:
+            # ---- Blood test group ----
+            thyrocare_product = item.thyrocare_product
+            if not thyrocare_product:
+                continue
+
+            member_ids = [i.member_id for i in items]
+            members_detail = []
+            for i in items:
+                member = i.member
+                members_detail.append({
+                    "member_id": member.id if member else i.member_id,
+                    "name": member.name if member else "Unknown",
+                    "relation": str(member.relation) if member else None,
+                    "age": member.age if member else None,
+                    "gender": member.gender if member else None,
+                    "dob": to_ist_isoformat(member.dob) if member and member.dob else None,
+                    "mobile": member.mobile if member else None,
+                })
+
+            address = item.address
             address_details = {
-                "address_id": address.id if address else i.address_id,
+                "address_id": address.id if address else item.address_id,
                 "address_label": address.address_label if address else None,
                 "street_address": address.street_address if address else None,
                 "landmark": address.landmark if address else None,
@@ -794,42 +952,106 @@ def view_cart(
                 "city": address.city if address else None,
                 "state": address.state if address else None,
                 "postal_code": address.postal_code if address else None,
-                "country": address.country if address else None
+                "country": address.country if address else None,
             }
-            
-            member_address_map.append({
-                "member": member_details,
-                "address": address_details
-            })
-        
-        # Get unique address IDs (may be 1 or multiple)
-        address_ids = list(set(i.address_id for i in items))
-        
-        # Calculate total (quantity * price) - price is already for the plan, not per member
-        total = item.quantity * product.SpecialPrice
-        subtotal_amount += total
-        
-        # Calculate discount per item (difference between price and special_price)
-        discount_per_item = product.Price - product.SpecialPrice
 
-        cart_item_details.append({
-            "cart_id": item.cart_id,  # Simple cart_id number
-            "cart_item_ids": [i.id for i in items],  # All cart item IDs in this group
-            "product_id": product.ProductId,
-            "address_ids": address_ids,  # List of unique address IDs used
-            "member_ids": member_ids,
-            "member_address_map": member_address_map,  # Per-member address mapping with full details
-            "product_name": product.Name,
-            "product_images": product.Images,
-            "plan_type": product.plan_type.value if hasattr(product.plan_type, 'value') else str(product.plan_type),
-            "price": product.Price,
-            "special_price": product.SpecialPrice,
-            "quantity": item.quantity,
-            "members_count": len(items),  # 1 for single, 2 for couple, 3-4 for family
-            "discount_per_item": discount_per_item,
-            "total_amount": total,
-            "group_id": item.group_id
-        })
+            total = thyrocare_product.selling_price * len(items)
+            subtotal_amount += total
+
+            cart_item_details.append({
+                "product_type": "blood_test",
+                "cart_id": item.cart_id,
+                "cart_item_ids": [i.id for i in items],
+                "thyrocare_product_id": thyrocare_product.id,
+                "thyrocare_id": thyrocare_product.thyrocare_id,
+                "product_name": thyrocare_product.name,
+                "no_of_tests_included": thyrocare_product.no_of_tests_included,
+                "is_fasting_required": thyrocare_product.is_fasting_required,
+                "member_ids": member_ids,
+                "members": members_detail,
+                "members_count": len(items),
+                "address": address_details,
+                "price_per_member": thyrocare_product.selling_price,
+                "listing_price_per_member": thyrocare_product.listing_price,
+                "total_amount": total,
+                "group_id": item.group_id,
+                "appointment_date": str(item.appointment_date) if item.appointment_date else None,
+                "appointment_start_time": item.appointment_start_time,
+            })
+
+        else:
+            # ---- Genetic test group (original logic — unchanged) ----
+            product = item.product
+
+            # Skip if product is deleted or missing
+            if not product:
+                continue
+
+            member_ids = [i.member_id for i in items]
+
+            # Build member-address mapping with full details for this group
+            member_address_map = []
+            for i in items:
+                member = i.member
+                address = i.address
+
+                member_details = {
+                    "member_id": member.id if member else i.member_id,
+                    "name": member.name if member else "Unknown",
+                    "relation": str(member.relation) if member else None,
+                    "age": member.age if member else None,
+                    "gender": member.gender if member else None,
+                    "dob": to_ist_isoformat(member.dob) if member and member.dob else None,
+                    "mobile": member.mobile if member else None
+                }
+
+                address_details = {
+                    "address_id": address.id if address else i.address_id,
+                    "address_label": address.address_label if address else None,
+                    "street_address": address.street_address if address else None,
+                    "landmark": address.landmark if address else None,
+                    "locality": address.locality if address else None,
+                    "city": address.city if address else None,
+                    "state": address.state if address else None,
+                    "postal_code": address.postal_code if address else None,
+                    "country": address.country if address else None
+                }
+
+                member_address_map.append({
+                    "member": member_details,
+                    "address": address_details
+                })
+
+            # Get unique address IDs (may be 1 or multiple)
+            address_ids = list(set(i.address_id for i in items))
+
+            # Calculate total (quantity * price) - price is already for the plan, not per member
+            total = item.quantity * product.SpecialPrice
+            subtotal_amount += total
+
+            # Calculate discount per item (difference between price and special_price)
+            discount_per_item = product.Price - product.SpecialPrice
+
+            cart_item_details.append({
+                "product_type": "genetic",
+                "cart_id": item.cart_id,
+                "cart_item_ids": [i.id for i in items],
+                "product_id": product.ProductId,
+                "address_ids": address_ids,
+                "member_ids": member_ids,
+                "member_address_map": member_address_map,
+                "product_name": product.Name,
+                "product_images": product.Images,
+                "plan_type": product.plan_type.value if hasattr(product.plan_type, 'value') else str(product.plan_type),
+                "price": product.Price,
+                "special_price": product.SpecialPrice,
+                "quantity": item.quantity,
+                "members_count": len(items),
+                "discount_per_item": discount_per_item,
+                "total_amount": total,
+                "group_id": item.group_id,
+            })
+        # end else (genetic)
 
     # Get applied coupon if any
     applied_coupon = get_applied_coupon(db, current_user.id)
@@ -837,11 +1059,18 @@ def view_cart(
     coupon_code = None
     coupon_warning = None
 
+    # Coupon applies only to genetic products
+    genetic_subtotal = sum(
+        items[0].quantity * items[0].product.SpecialPrice
+        for items in grouped_items.values()
+        if items and str(getattr(items[0], 'product_type', '')).lower() != "blood_test" and items[0].product
+    )
+
     if applied_coupon:
         # Re-validate and recalculate discount (cart total might have changed)
         # Pass cart_items for product type validation (e.g., FAMILYCOUPLE30 coupon)
         coupon, calculated_discount, error_message = validate_and_calculate_discount(
-            db, applied_coupon.coupon_code, current_user.id, subtotal_amount, cart_items
+            db, applied_coupon.coupon_code, current_user.id, genetic_subtotal, cart_items
         )
         
         if coupon and not error_message:
@@ -1006,10 +1235,15 @@ def apply_coupon(
             if not items:
                 continue
             item = items[0]
-            product = item.product
-            if not product:
-                continue
-            subtotal_amount += item.quantity * product.SpecialPrice
+            from Cart_module.Cart_model import ProductType as PT
+            if getattr(item, 'product_type', None) == PT.BLOOD_TEST:
+                # Blood test items excluded from coupon subtotal
+                pass
+            else:
+                product = item.product
+                if not product:
+                    continue
+                subtotal_amount += item.quantity * product.SpecialPrice
         
         # Calculate product discount (informational only)
         total_product_discount = 0.0

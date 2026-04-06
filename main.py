@@ -53,6 +53,7 @@ from Tracking_module.Tracking_model import TrackingRecord  # Location & Analytic
 from Account_module.Account_model import AccountFeedbackRequest
 from Enquiry_module.Enquiry_model import EnquiryRequest
 from Notification_module.Notification_model import Notification, UserDeviceToken
+from Thyrocare_module.Thyrocare_model import ThyrocareProduct, ThyrocareTestParameter
 
 # Import Google Meet API models to register with SQLAlchemy Base
 try:
@@ -85,6 +86,7 @@ from Notification_module.Notification_router import router as notification_route
 from Tracking_module.Tracking_router import router as tracking_router
 from Account_module.Account_router import router as account_router
 from Enquiry_module.Enquiry_router import router as enquiry_router
+from Thyrocare_module.Thyrocare_router import router as thyrocare_router
 
 # Google Meet API router
 try:
@@ -626,6 +628,7 @@ app.include_router(notification_router)  # /api/notifications
 app.include_router(tracking_router)  # /api/tracking/event
 app.include_router(account_router)  # /account/feedback
 app.include_router(enquiry_router)  # /enquiry (form + POST)
+app.include_router(thyrocare_router)  # /thyrocare
 
 # Include Google Meet API router if available
 if gmeet_router:

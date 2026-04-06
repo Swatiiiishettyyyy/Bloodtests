@@ -441,6 +441,14 @@ def create_order_from_cart(
         item = items[0]  # Use first item as representative
         product = item.product
         
+        # Skip blood test items — they are booked via Thyrocare after payment
+        from Cart_module.Cart_model import ProductType as PT
+        if getattr(item, 'product_type', None) == PT.BLOOD_TEST:
+            thyrocare_product = item.thyrocare_product
+            if thyrocare_product:
+                subtotal += thyrocare_product.selling_price * len(items)
+            continue
+
         # Skip if product is deleted or missing
         if not product:
             continue
@@ -534,6 +542,81 @@ def create_order_from_cart(
     
     # Create order items and snapshots
     for cart_item in cart_items:
+        from Cart_module.Cart_model import ProductType as PT
+        is_blood_test = getattr(cart_item, 'product_type', None) == PT.BLOOD_TEST
+
+        if is_blood_test:
+            thyrocare_product = cart_item.thyrocare_product
+            member = cart_item.member
+            address_obj = cart_item.address
+            if not thyrocare_product or not member or not address_obj:
+                raise ValueError(f"Missing data for blood test cart item {cart_item.id}")
+
+            snapshot = OrderSnapshot(
+                order_id=order.id,
+                user_id=user_id,
+                product_data={
+                    "product_type": "blood_test",
+                    "thyrocare_product_id": thyrocare_product.id,
+                    "thyrocare_id": thyrocare_product.thyrocare_id,
+                    "Name": thyrocare_product.name,
+                    "SellingPrice": thyrocare_product.selling_price,
+                    "ListingPrice": thyrocare_product.listing_price,
+                    "appointment_date": str(cart_item.appointment_date) if cart_item.appointment_date else None,
+                    "appointment_start_time": cart_item.appointment_start_time,
+                },
+                member_data={
+                    "id": member.id,
+                    "name": member.name,
+                    "relation": member.relation.value if hasattr(member.relation, 'value') else str(member.relation),
+                    "age": member.age,
+                    "gender": member.gender,
+                    "dob": to_ist_isoformat(member.dob) if member.dob else None,
+                    "mobile": member.mobile,
+                },
+                address_data={
+                    "id": address_obj.id,
+                    "address_label": address_obj.address_label,
+                    "street_address": address_obj.street_address,
+                    "landmark": address_obj.landmark,
+                    "locality": address_obj.locality,
+                    "city": address_obj.city,
+                    "state": address_obj.state,
+                    "postal_code": address_obj.postal_code,
+                    "country": address_obj.country,
+                },
+                cart_item_data={"group_id": cart_item.group_id, "product_type": "blood_test"},
+            )
+            db.add(snapshot)
+            db.flush()
+
+            order_item = OrderItem(
+                order_id=order.id,
+                user_id=user_id,
+                product_id=None,
+                thyrocare_product_id=thyrocare_product.id,
+                member_id=member.id,
+                address_id=cart_item.address_id,
+                snapshot_id=snapshot.id,
+                quantity=1,
+                unit_price=thyrocare_product.selling_price,
+                order_status=OrderStatus.PENDING_PAYMENT,
+            )
+            db.add(order_item)
+            db.flush()
+
+            item_status_history = OrderStatusHistory(
+                order_id=order.id,
+                order_item_id=order_item.id,
+                status=OrderStatus.PENDING_PAYMENT,
+                previous_status=None,
+                notes=f"Blood test order item created for member {member.name}. Waiting for payment.",
+                changed_by=str(user_id),
+            )
+            db.add(item_status_history)
+            continue
+
+        # --- Genetic test item (original logic) ---
         product = cart_item.product
         member = cart_item.member
         address_obj = cart_item.address

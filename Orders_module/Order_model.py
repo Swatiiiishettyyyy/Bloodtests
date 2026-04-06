@@ -110,6 +110,12 @@ class OrderItem(Base):
     
     quantity = Column(Integer, default=1)
     unit_price = Column(Float, nullable=False)  # SpecialPrice at time of order (final price per unit)
+
+    # Blood test: Thyrocare order reference (set after Thyrocare booking post-payment)
+    thyrocare_order_id = Column(String(100), nullable=True, index=True)
+    thyrocare_product_id = Column(Integer, ForeignKey("thyrocare_products.id", ondelete="RESTRICT"), nullable=True)
+    thyrocare_booking_status = Column(String(20), nullable=True, index=True)  # PENDING, BOOKED, FAILED
+    thyrocare_booking_error = Column(String(500), nullable=True)  # Error message if booking failed
     
     # Per-item status tracking (for different addresses in couple/family packs)
     order_status = Column(Enum(OrderStatus), nullable=False, default=OrderStatus.PENDING_PAYMENT, index=True)

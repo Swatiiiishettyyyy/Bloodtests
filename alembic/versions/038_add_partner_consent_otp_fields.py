@@ -29,71 +29,55 @@ def upgrade() -> None:
     inspector = sa.inspect(connection)
     tables = inspector.get_table_names()
     
-    if 'partner_consents' in tables:
-        # Add request state machine fields
-        op.add_column('partner_consents', 
-            sa.Column('request_status', sa.String(20), nullable=False, server_default='PENDING_REQUEST'))
-        op.add_column('partner_consents', 
-            sa.Column('request_id', sa.String(50), nullable=True))
-        
-        # Add OTP tracking fields
-        op.add_column('partner_consents', 
-            sa.Column('otp_expires_at', sa.DateTime(timezone=True), nullable=True))
-        op.add_column('partner_consents', 
-            sa.Column('otp_sent_at', sa.DateTime(timezone=True), nullable=True))
-        
-        # Add request expiration fields
-        op.add_column('partner_consents', 
-            sa.Column('request_expires_at', sa.DateTime(timezone=True), nullable=True))
-        op.add_column('partner_consents', 
-            sa.Column('last_request_created_at', sa.DateTime(timezone=True), nullable=True))
-        
-        # Add rate limiting fields
-        op.add_column('partner_consents', 
-            sa.Column('failed_attempts', sa.Integer(), nullable=False, server_default='0'))
-        op.add_column('partner_consents', 
-            sa.Column('resend_count', sa.Integer(), nullable=False, server_default='0'))
-        op.add_column('partner_consents', 
-            sa.Column('total_attempts', sa.Integer(), nullable=False, server_default='1'))
-        
-        # Add revocation tracking
-        op.add_column('partner_consents', 
-            sa.Column('revoked_at', sa.DateTime(timezone=True), nullable=True))
-        
-        # Create indexes
+    if 'partner_consents' not in tables:
+        return
+
+    existing_columns = {col['name'] for col in inspector.get_columns('partner_consents')}
+
+    def add_col(col_name, col_def):
+        if col_name not in existing_columns:
+            op.add_column('partner_consents', col_def)
+
+    add_col('request_status', sa.Column('request_status', sa.String(20), nullable=False, server_default='PENDING_REQUEST'))
+    add_col('request_id', sa.Column('request_id', sa.String(50), nullable=True))
+    add_col('otp_expires_at', sa.Column('otp_expires_at', sa.DateTime(timezone=True), nullable=True))
+    add_col('otp_sent_at', sa.Column('otp_sent_at', sa.DateTime(timezone=True), nullable=True))
+    add_col('request_expires_at', sa.Column('request_expires_at', sa.DateTime(timezone=True), nullable=True))
+    add_col('last_request_created_at', sa.Column('last_request_created_at', sa.DateTime(timezone=True), nullable=True))
+    add_col('failed_attempts', sa.Column('failed_attempts', sa.Integer(), nullable=False, server_default='0'))
+    add_col('resend_count', sa.Column('resend_count', sa.Integer(), nullable=False, server_default='0'))
+    add_col('total_attempts', sa.Column('total_attempts', sa.Integer(), nullable=False, server_default='1'))
+    add_col('revoked_at', sa.Column('revoked_at', sa.DateTime(timezone=True), nullable=True))
+
+    # Create indexes only if they don't exist
+    existing_indexes = {idx['name'] for idx in inspector.get_indexes('partner_consents')}
+    if 'ix_partner_consents_request_status' not in existing_indexes:
         op.create_index('ix_partner_consents_request_status', 'partner_consents', ['request_status'], unique=False)
+    if 'ix_partner_consents_request_id' not in existing_indexes:
         op.create_index('ix_partner_consents_request_id', 'partner_consents', ['request_id'], unique=True)
-        
-        # Update existing records to have proper defaults
-        # Set request_status for existing records based on their current state
-        try:
-            op.execute(text("""
-                UPDATE partner_consents 
-                SET request_status = CASE 
-                    WHEN final_status = 'yes' THEN 'CONSENT_GIVEN'
-                    WHEN partner_consent = 'no' THEN 'DECLINED'
-                    ELSE 'PENDING_REQUEST'
-                END
-            """))
-        except Exception as e:
-            # If update fails, continue - new records will have correct defaults
-            print(f"Warning: Could not update existing request_status: {e}")
-        
-        # Alter column defaults for partner_consent and consent_source
-        # Note: This changes the default for new records, existing records keep their values
-        try:
-            # For MySQL, we need to alter the column to change the default
-            dialect_name = connection.dialect.name
-            if dialect_name == 'mysql':
-                op.execute(text("ALTER TABLE partner_consents MODIFY COLUMN partner_consent VARCHAR(10) NOT NULL DEFAULT 'pending'"))
-                op.execute(text("ALTER TABLE partner_consents MODIFY COLUMN consent_source VARCHAR(20) NOT NULL DEFAULT 'partner_otp'"))
-            else:
-                # For other databases (PostgreSQL, SQLite)
-                op.alter_column('partner_consents', 'partner_consent', server_default='pending')
-                op.alter_column('partner_consents', 'consent_source', server_default='partner_otp')
-        except Exception as e:
-            # If altering defaults fails, continue - model defaults will handle it
-            print(f"Warning: Could not update column defaults: {e}")
+
+    try:
+        op.execute(text("""
+            UPDATE partner_consents 
+            SET request_status = CASE 
+                WHEN final_status = 'yes' THEN 'CONSENT_GIVEN'
+                WHEN partner_consent = 'no' THEN 'DECLINED'
+                ELSE 'PENDING_REQUEST'
+            END
+        """))
+    except Exception as e:
+        print(f"Warning: Could not update existing request_status: {e}")
+
+    try:
+        dialect_name = connection.dialect.name
+        if dialect_name == 'mysql':
+            op.execute(text("ALTER TABLE partner_consents MODIFY COLUMN partner_consent VARCHAR(10) NOT NULL DEFAULT 'pending'"))
+            op.execute(text("ALTER TABLE partner_consents MODIFY COLUMN consent_source VARCHAR(20) NOT NULL DEFAULT 'partner_otp'"))
+        else:
+            op.alter_column('partner_consents', 'partner_consent', server_default='pending')
+            op.alter_column('partner_consents', 'consent_source', server_default='partner_otp')
+    except Exception as e:
+        print(f"Warning: Could not update column defaults: {e}")
 
 
 def downgrade() -> None:
