@@ -908,7 +908,13 @@ def view_cart(
     # Group items by group_id to show couple/family products together
     grouped_items = {}
     for item in cart_items:
-        group_key = item.group_id or f"single_{item.id}"
+        raw_type = getattr(item, 'product_type', None)
+        is_blood_test = str(raw_type).lower() == "blood_test"
+        if is_blood_test and not item.group_id:
+            # Blood test items without group_id: group by product+address to keep members together
+            group_key = f"bt_{item.thyrocare_product_id}_{item.address_id}"
+        else:
+            group_key = item.group_id or f"single_{item.id}"
         if group_key not in grouped_items:
             grouped_items[group_key] = []
         grouped_items[group_key].append(item)
@@ -977,6 +983,7 @@ def view_cart(
                 "group_id": item.group_id,
                 "appointment_date": str(item.appointment_date) if item.appointment_date else None,
                 "appointment_start_time": item.appointment_start_time,
+                "price_note": "Estimated price. Confirmed price available via /thyrocare/cart/price-breakup before checkout.",
             })
 
         else:

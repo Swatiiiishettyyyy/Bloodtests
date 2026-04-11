@@ -8,6 +8,7 @@ import hashlib
 from typing import Dict, Any, Optional
 from dotenv import load_dotenv
 import os
+import requests
 
 load_dotenv()
 
@@ -70,10 +71,25 @@ def create_razorpay_order(amount: float, currency: str = "INR", receipt: Optiona
         raise ValueError(f"Invalid request to Razorpay: {str(e)}")
     except razorpay.errors.ServerError as e:
         logger.error(f"Razorpay server error: {e}")
-        raise ValueError(f"Razorpay server error: {str(e)}")
+        raise ConnectionError(f"Razorpay server error: {str(e)}")
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout, OSError) as e:
+        logger.error(f"Network error connecting to Razorpay: {e}", exc_info=True)
+        raise ConnectionError(
+            f"Unable to reach Razorpay payment gateway. "
+            f"This is a network connectivity issue on the server side. "
+            f"Details: {type(e).__name__}: {str(e)}"
+        )
     except Exception as e:
-        logger.error(f"Error creating Razorpay order: {e}")
-        raise ValueError(f"Failed to create Razorpay order: {str(e)}")
+        # Check if it's a connection-related error wrapped in a generic exception
+        err_str = str(e).lower()
+        if any(kw in err_str for kw in ("connection", "timeout", "reset", "refused", "network", "aborted")):
+            logger.error(f"Network-related error creating Razorpay order: {e}", exc_info=True)
+            raise ConnectionError(
+                f"Unable to reach Razorpay payment gateway (network error). "
+                f"Details: {type(e).__name__}: {str(e)}"
+            )
+        logger.error(f"Unexpected error creating Razorpay order: {e}", exc_info=True)
+        raise ValueError(f"Failed to create Razorpay order: {type(e).__name__}: {str(e)}")
 
 
 def verify_payment_signature(razorpay_order_id: str, razorpay_payment_id: str, razorpay_signature: str) -> bool:

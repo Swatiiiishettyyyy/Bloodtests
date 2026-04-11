@@ -703,7 +703,7 @@ if __name__ == "__main__":
         return None
     
     # Get port from environment or use default
-    requested_port = int(os.getenv("PORT", 8030))
+    requested_port = int(os.getenv("PORT", 8080))
     
     # Check if requested port is available, if not find next available
     if not is_port_available(requested_port):

@@ -82,6 +82,10 @@ class Order(Base):
     created_at = Column(DateTime(timezone=True), default=now_ist, nullable=False, index=True)
     updated_at = Column(DateTime(timezone=True), onupdate=now_ist)
 
+    # Thyrocare booking reference (set after successful Thyrocare booking post-payment)
+    thyrocare_order_id = Column(String(100), nullable=True, index=True)
+    thyrocare_booking_status = Column(String(20), nullable=True, index=True)  # BOOKED / FAILED
+
     # Relationships
     user = relationship("User")
     address = relationship("Address")

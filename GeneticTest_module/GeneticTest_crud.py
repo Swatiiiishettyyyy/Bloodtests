@@ -16,7 +16,7 @@ def get_latest_order_for_member(
     member_id: int
 ) -> Optional[dict]:
     """
-    Most recent order for this member (any status), by order date then id.
+    Most recent genetic test order for this member (any status), by order date then id.
     Returns dict with order_id, order_number, order_status or None.
     """
     from Orders_module.Order_model import Order, OrderItem
@@ -24,7 +24,10 @@ def get_latest_order_for_member(
     order = (
         db.query(Order)
         .join(OrderItem, OrderItem.order_id == Order.id)
-        .filter(OrderItem.member_id == member_id)
+        .filter(
+            OrderItem.member_id == member_id,
+            OrderItem.product_id != None,  # genetic test items only
+        )
         .order_by(Order.created_at.desc(), Order.id.desc())
         .first()
     )
@@ -54,6 +57,7 @@ def get_latest_report_ready_order_for_member(
         .join(OrderItem, OrderItem.order_id == Order.id)
         .filter(
             OrderItem.member_id == member_id,
+            OrderItem.product_id != None,  # genetic test items only
             OrderItem.order_status.in_([OrderStatus.REPORT_READY, OrderStatus.COMPLETED]),
         )
         .order_by(Order.created_at.desc(), Order.id.desc())

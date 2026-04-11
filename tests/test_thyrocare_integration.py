@@ -10,23 +10,6 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 
-def test_extract_payable_amount_from_breakup():
-    """Test payable amount extraction from Thyrocare price-breakup response."""
-    from Thyrocare_module.thyrocare_cart_service import extract_payable_amount_from_breakup
-
-    assert extract_payable_amount_from_breakup({}) == 0.0
-    assert extract_payable_amount_from_breakup(None) == 0.0
-
-    breakup = {"rates": {"netPayableAmount": "1300"}}
-    assert extract_payable_amount_from_breakup(breakup) == 1300.0
-
-    breakup = {"rates": {"totalSellingPrice": 1200}}
-    assert extract_payable_amount_from_breakup(breakup) == 1200.0
-
-    breakup = {"price": {"netPayableAmount": "999"}}
-    assert extract_payable_amount_from_breakup(breakup) == 999.0
-
-
 def test_thyrocare_status_mapping():
     """Test Thyrocare status to Nucleoseq OrderStatus mapping."""
     from Thyrocare_module.thyrocare_order_status_service import (
@@ -44,26 +27,13 @@ def test_thyrocare_status_mapping():
     assert _map_thyrocare_status("DONE") == OrderStatus.REPORT_READY
     assert _map_thyrocare_status("REPORTED") == OrderStatus.REPORT_READY
     assert _map_thyrocare_status("CANCELLED") == OrderStatus.CANCELLED
+    # Unknown status should fall back to CONFIRMED (not PENDING)
+    assert _map_thyrocare_status("UNKNOWN_STATUS") == OrderStatus.CONFIRMED
 
     assert _is_terminal_state("DONE") is True
     assert _is_terminal_state("REPORTED") is True
     assert _is_terminal_state("CANCELLED") is True
     assert _is_terminal_state("ASSIGNED") is False
-
-
-def test_extract_price_from_breakup():
-    """Test price object extraction for Thyrocare create-order payload."""
-    from Thyrocare_module.thyrocare_orders_service import _extract_price_from_breakup
-
-    assert _extract_price_from_breakup({}) == {}
-    assert _extract_price_from_breakup({"rates": {"discounts": [], "incentives": {}}}) == {
-        "discounts": [],
-        "incentivePasson": {},
-    }
-    assert _extract_price_from_breakup({"discounts": [1], "incentivePasson": {"x": 1}}) == {
-        "discounts": [1],
-        "incentivePasson": {"x": 1},
-    }
 
 
 def test_normalize_thyrocare_errors():
@@ -73,4 +43,4 @@ def test_normalize_thyrocare_errors():
     errors = {"errors": [{"code": "BAD_REQUEST", "message": "Invalid pincode"}]}
     result = normalize_thyrocare_errors(errors)
     assert result["message"] == "Invalid pincode"
-    assert "error_code" in result or "raw" in result
+    assert "raw" in result

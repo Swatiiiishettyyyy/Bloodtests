@@ -6,17 +6,17 @@ def _map_thyrocare_status(thyro_status: str) -> OrderStatus:
     """
     status_map = {
         "YET TO ASSIGN": OrderStatus.CONFIRMED,
-        "ASSIGNED": OrderStatus.PHLEBO_ASSIGNED,
-        "ACCEPTED": OrderStatus.PHLEBO_ASSIGNED,
-        "STARTED": OrderStatus.PHLEBO_EN_ROUTE,
-        "ARRIVED": OrderStatus.PHLEBO_ARRIVED,
+        "ASSIGNED": OrderStatus.SCHEDULED,
+        "ACCEPTED": OrderStatus.SCHEDULED,
+        "STARTED": OrderStatus.SCHEDULE_CONFIRMED_BY_LAB,
+        "ARRIVED": OrderStatus.SAMPLE_COLLECTED,
         "CONFIRMED": OrderStatus.SAMPLE_COLLECTED,
         "DONE": OrderStatus.REPORT_READY,
         "REPORTED": OrderStatus.REPORT_READY,
-        "CANCELLED": OrderStatus.CANCELLED
+        "CANCELLED": OrderStatus.PAYMENT_FAILED,  # closest terminal failure state available
     }
     
-    return status_map.get(thyro_status.upper(), OrderStatus.PENDING)
+    return status_map.get(thyro_status.upper(), OrderStatus.CONFIRMED)
 
 def _is_terminal_state(thyro_status: str) -> bool:
     """

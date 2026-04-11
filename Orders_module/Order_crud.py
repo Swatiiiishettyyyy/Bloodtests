@@ -287,9 +287,9 @@ def find_existing_order_for_retry(
         return None
     
     # Build set of cart item signatures for matching
-    # Signature: (product_id, member_id, address_id, quantity)
+    # Use thyrocare_product_id for blood test items, product_id for genetic items
     cart_signatures = {
-        (item.product_id, item.member_id, item.address_id, item.quantity)
+        (item.product_id, item.thyrocare_product_id, item.member_id, item.address_id, item.quantity)
         for item in cart_items
     }
     
@@ -320,7 +320,7 @@ def find_existing_order_for_retry(
         
         # Build set of order item signatures
         order_signatures = {
-            (item.product_id, item.member_id, item.address_id, item.quantity)
+            (item.product_id, item.thyrocare_product_id, item.member_id, item.address_id, item.quantity)
             for item in order_items
         }
         
@@ -343,11 +343,13 @@ def create_order_from_cart(
     placed_by_member_id: Optional[int] = None,
     prevalidated_coupon_code: Optional[str] = None,
     prevalidated_coupon_discount: float = 0.0,
+    thyrocare_confirmed_amount: Optional[float] = None,
 ) -> Order:
     """
     Create order from cart items.
     Creates snapshots of products, members, and addresses at time of order.
     """
+    from Cart_module.Cart_model import ProductType as PT
     # Validate all cart items belong to user (exclude deleted items)
     cart_items = (
         db.query(CartItem)
@@ -433,6 +435,7 @@ def create_order_from_cart(
     # Calculate subtotal and discount (price is per product, not per member)
     # For couple/family products, there are multiple cart item rows but discount applies once per product
     # This matches the cart calculation logic exactly
+    blood_test_confirmed_used = False
     for group_key, items in grouped_items.items():
         # Skip if group is empty (should not happen, but safety check)
         if not items:
@@ -442,11 +445,15 @@ def create_order_from_cart(
         product = item.product
         
         # Skip blood test items — they are booked via Thyrocare after payment
-        from Cart_module.Cart_model import ProductType as PT
         if getattr(item, 'product_type', None) == PT.BLOOD_TEST:
             thyrocare_product = item.thyrocare_product
-            if thyrocare_product:
-                subtotal += thyrocare_product.selling_price * len(items)
+            if not thyrocare_product:
+                raise ValueError(f"Blood test cart item {item.id} has no associated Thyrocare product")
+            if not blood_test_confirmed_used:
+                # thyrocare_confirmed_amount is the combined total for ALL blood test groups
+                subtotal += thyrocare_confirmed_amount
+                blood_test_confirmed_used = True
+            # subsequent blood test groups already counted in thyrocare_confirmed_amount
             continue
 
         # Skip if product is deleted or missing
@@ -470,8 +477,15 @@ def create_order_from_cart(
     else:
         applied_coupon = get_applied_coupon(db, user_id)
         if applied_coupon:
+            # Coupons apply to genetic test items only
+            from Cart_module.Cart_model import ProductType as _PT
+            genetic_subtotal = sum(
+                item.quantity * item.product.SpecialPrice
+                for item in cart_items
+                if getattr(item, 'product_type', None) != _PT.BLOOD_TEST and item.product
+            )
             coupon, calculated_discount, error_message = validate_and_calculate_discount(
-                db, applied_coupon.coupon_code, user_id, subtotal, cart_items
+                db, applied_coupon.coupon_code, user_id, genetic_subtotal, cart_items
             )
 
             if coupon and not error_message:
@@ -540,9 +554,19 @@ def create_order_from_cart(
         payment.notes = f"Initial payment record created with order (Razorpay order ID: {razorpay_order_id})"
         db.flush()
     
+    # Pre-calculate per-member unit price for blood test items from confirmed amount
+    blood_test_items_count = sum(
+        1 for ci in cart_items
+        if getattr(ci, 'product_type', None) == PT.BLOOD_TEST
+    )
+    blood_test_unit_price = (
+        round(thyrocare_confirmed_amount / blood_test_items_count, 2)
+        if thyrocare_confirmed_amount and blood_test_items_count > 0
+        else 0.0
+    )
+
     # Create order items and snapshots
     for cart_item in cart_items:
-        from Cart_module.Cart_model import ProductType as PT
         is_blood_test = getattr(cart_item, 'product_type', None) == PT.BLOOD_TEST
 
         if is_blood_test:
@@ -599,7 +623,7 @@ def create_order_from_cart(
                 address_id=cart_item.address_id,
                 snapshot_id=snapshot.id,
                 quantity=1,
-                unit_price=thyrocare_product.selling_price,
+                unit_price=blood_test_unit_price,
                 order_status=OrderStatus.PENDING_PAYMENT,
             )
             db.add(order_item)
@@ -1308,7 +1332,9 @@ def confirm_order_from_webhook(
             group_key = group_key or str(item.id)
 
             if group_key not in _groups:
-                _groups[group_key] = {"name": item_name, "amount": item.unit_price * item.quantity}
+                _groups[group_key] = {"name": item_name, "amount": 0}
+            # Accumulate unit_price across all members in the group (handles blood test multi-member)
+            _groups[group_key]["amount"] += item.unit_price if item.unit_price else 0
         invoice_items = list(_groups.values())
             
         # Prepare payment info
@@ -1646,14 +1672,6 @@ def update_order_status(
             "cart clearing and genetic test flag setting occur correctly."
         )
     
-    # Prevent setting order to post-payment statuses if payment is not completed
-    if new_status in POST_PAYMENT_STATUSES:
-        if order.payment_status != PaymentStatus.COMPLETED:
-            raise ValueError(
-                f"Cannot set order status to {new_status.value} because payment status is {order.payment_status.value}. "
-                f"Payment must be completed before setting post-payment statuses."
-            )
-    
     # If updating specific order item
     if order_item_id:
         order_item = db.query(OrderItem).filter(
@@ -1907,23 +1925,6 @@ def _sync_order_status(db: Session, order: Order) -> Optional[Tuple[str, str, st
         # Return payload for router to send after commit (no _notify here)
         return _get_notification_payload_for_status(order, target_status)
     return None
-
-
-def _notify_order_status_change(db: Session, order: Order, target_status: OrderStatus) -> None:
-    """Send push notification for order status changes (report ready and intermediate statuses)."""
-    order_num = order.order_number
-    messages = {
-        OrderStatus.COMPLETED: ("Report ready", f"Your lab report for order {order_num} is ready.", "success"),
-        OrderStatus.SCHEDULED: ("Sample scheduled", f"Your sample collection for order {order_num} has been scheduled.", "info"),
-        OrderStatus.SCHEDULE_CONFIRMED_BY_LAB: ("Schedule confirmed", f"Lab has confirmed the schedule for order {order_num}.", "info"),
-        OrderStatus.SAMPLE_COLLECTED: ("Sample collected", f"Sample for order {order_num} has been collected.", "info"),
-        OrderStatus.SAMPLE_RECEIVED_BY_LAB: ("Sample at lab", f"Lab has received the sample for order {order_num}.", "info"),
-        OrderStatus.TESTING_IN_PROGRESS: ("Testing in progress", f"Testing in progress for order {order_num}.", "info"),
-        OrderStatus.REPORT_READY: ("Report ready", f"Your lab report for order {order_num} is ready.", "success"),
-    }
-    if target_status in messages:
-        title, message, ntype = messages[target_status]
-        _send_order_notification(db, order, title, message, type=ntype)
 
 
 def get_order_by_id(db: Session, order_id: int, user_id: Optional[int] = None, include_all_payment_statuses: bool = False) -> Optional[Order]:

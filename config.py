@@ -93,21 +93,9 @@ class Settings(BaseSettings):
 # Create the settings instance
 settings = Settings()
 
-# Backward compatibility: If ACCESS_TOKEN_EXPIRE_SECONDS is set in env, use it
-# Otherwise, calculate from ACCESS_TOKEN_EXPIRE_MINUTES
-# IMPORTANT: Only use env value if it's explicitly set and reasonable (< 1 hour for security)
-# Otherwise, always calculate from ACCESS_TOKEN_EXPIRE_MINUTES to ensure consistency
-if "ACCESS_TOKEN_EXPIRE_SECONDS" in os.environ:
-    env_value = int(os.getenv("ACCESS_TOKEN_EXPIRE_SECONDS", str(settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60)))
-    # Only use env value if it's reasonable (less than 1 hour = 3600 seconds)
-    # This prevents accidentally setting very long expiration times
-    if env_value <= 3600:
-        settings.ACCESS_TOKEN_EXPIRE_SECONDS = env_value
-    else:
-        # Env value is too large, calculate from minutes instead
-        settings.ACCESS_TOKEN_EXPIRE_SECONDS = settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
-else:
-    settings.ACCESS_TOKEN_EXPIRE_SECONDS = settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
+# ACCESS_TOKEN_EXPIRE_SECONDS is always derived from ACCESS_TOKEN_EXPIRE_MINUTES.
+# Whatever is set in env (locally or in AWS App Runner) is the final value — no cap applied.
+settings.ACCESS_TOKEN_EXPIRE_SECONDS = settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
 
 # Fallback CSRF_SECRET_KEY if not set (use SECRET_KEY with prefix)
 if not settings.CSRF_SECRET_KEY:

@@ -8,7 +8,7 @@ from datetime import datetime, date
 
 class CreateOrderRequest(BaseModel):
     """Request to create order from cart"""
-    cart_id: int = Field(..., description="Cart item ID (used as reference, all user's cart items are included)", gt=0)
+    cart_id: Optional[int] = Field(None, description="Cart ID (optional reference, all user's active cart items are included)", gt=0)
 
 
 class RazorpayOrderResponse(BaseModel):

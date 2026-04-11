@@ -33,6 +33,9 @@ from Address_module.Address_audit_model import AddressAudit
 from Cart_module.Cart_audit_model import AuditLog
 from Audit_module.Profile_audit_crud import ProfileAuditLog
 from Login_module.Device.Device_session_audit_model import SessionAuditLog
+from Thyrocare_module.Thyrocare_model import ThyrocareProduct, ThyrocarePincode
+from Thyrocare_module.thyrocare_webhook_model import ThyrocareOrderTracking, ThyrocarePatientTracking, ThyrocareOrderStatusHistory
+from Thyrocare_module.thyrocare_lab_result_model import ThyrocareLabResult
 from Login_module.OTP.OTP_Log_Model import OTPAuditLog
 from Login_module.Token.Refresh_token_model import RefreshToken  # Dual-token strategy
 from Consent_module.Consent_model import UserConsent, ConsentProduct, PartnerConsent

@@ -177,61 +177,23 @@ def create_order(
                         item.cart_id = cart.id
                 db.flush()  # Flush - will be committed with order creation
         
-        # Validate that cart has items (more lenient - checks if ANY active items exist)
-        # The cart_id in request is just a reference, we use all active cart items
+        # Validate that cart has items
         if not cart_items:
-            # Check if the specific cart_item_id exists but is deleted (helpful error message)
-            if request_data.cart_id:
-                deleted_item = db.query(CartItem).filter(
-                    CartItem.id == request_data.cart_id,
-                    CartItem.user_id == current_user.id
-                ).first()
-                
-                if deleted_item:
-                    # Item exists but is soft-deleted (cart was cleared)
-                    client_ip = get_client_info(request) if request else None
-                    logger.warning(
-                        f"Order creation failed - Cart item was removed | "
-                        f"User ID: {current_user.id} | Cart Item ID: {request_data.cart_id} | IP: {client_ip}"
-                    )
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail="This item has been removed from your cart. Please refresh and try again."
-                    )
-            
-            # No active cart items found
             client_ip = get_client_info(request) if request else None
             logger.warning(
                 f"Order creation failed - Empty cart | "
-                f"User ID: {current_user.id} | IP: {client_ip}"
+                f"User ID: {current_user.id} | Cart ID: {request_data.cart_id} | IP: {client_ip}"
             )
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Your cart is empty. Please add items to your cart before placing an order."
             )
         
-        # Optional: Validate that the provided cart_item_id exists in the active cart items
-        # This is just a sanity check - if it doesn't match, we still proceed with all active items
-        if request_data.cart_id:
-            cart_item_ids = [item.id for item in cart_items]
-            if request_data.cart_id not in cart_item_ids:
-                # The provided cart_item_id is not in current active items
-                # This can happen if cart was cleared and new items added
-                # We'll proceed anyway with all active items (more lenient approach)
-                logger.warning(
-                    f"Cart item ID {request_data.cart_id} not found in active cart items for user {current_user.id}. "
-                    f"Proceeding with all active cart items ({len(cart_items)} items)."
-                )
-        
-        if not cart_items:
-            client_ip = get_client_info(request) if request else None
+        # Validate that the provided cart_id matches the user's active cart
+        if cart and request_data.cart_id != cart.id:
             logger.warning(
-                f"Order creation failed - Empty cart | "
-                f"User ID: {current_user.id} | IP: {client_ip}"
-            )
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Your cart is empty. Please add items to your cart before placing an order."
+                f"Cart ID {request_data.cart_id} does not match active cart {cart.id} for user {current_user.id}. "
+                f"Proceeding with active cart items ({len(cart_items)} items)."
             )
         
         # Get unique addresses from cart items
@@ -281,24 +243,45 @@ def create_order(
             if group_key not in grouped_items:
                 grouped_items[group_key] = []
             grouped_items[group_key].append(item)
-        
+
+        # Fetch confirmed Thyrocare amount internally (replaces frontend-passed thyrocare_confirmed_amount)
+        from Thyrocare_module.thyrocare_cart_service import get_thyrocare_confirmed_amount
+        thyrocare_confirmed_amount = get_thyrocare_confirmed_amount(db, cart_items)
+
+        # Track which blood test groups have already used thyrocare_confirmed_amount
+        blood_test_confirmed_used = False
+
         for group_key, items in grouped_items.items():
             # Skip if group is empty (should not happen, but safety check)
             if not items:
                 continue
                 
             item = items[0]
+
+            # Blood test items: use Thyrocare-confirmed amount (authoritative, fetched internally)
+            if item.product_type == "blood_test" and item.thyrocare_product:
+                if not blood_test_confirmed_used:
+                    subtotal += thyrocare_confirmed_amount
+                    blood_test_confirmed_used = True
+                # subsequent blood test groups already counted in thyrocare_confirmed_amount (combined total)
+                continue
+
+            # Skip if genetic product is deleted or missing
             product = item.product
-            
-            # Skip if product is deleted or missing
             if not product:
                 continue
                 
             subtotal += item.quantity * product.SpecialPrice
         
         # Get coupon discount for Razorpay order amount
-        # Recalculate using the same logic as order creation to keep amounts in sync
+        # Coupons apply to genetic test items only — exclude blood test subtotal
         from Cart_module.coupon_service import get_applied_coupon, validate_and_calculate_discount
+        from Cart_module.Cart_model import ProductType as _PT
+        genetic_subtotal = sum(
+            item.quantity * item.product.SpecialPrice
+            for item in cart_items
+            if getattr(item, 'product_type', None) != _PT.BLOOD_TEST and item.product
+        )
         applied_coupon = get_applied_coupon(db, current_user.id)
         coupon_discount = 0.0
 
@@ -307,24 +290,33 @@ def create_order(
                 db,
                 applied_coupon.coupon_code,
                 current_user.id,
-                subtotal,
+                genetic_subtotal,
                 cart_items,
             )
             if coupon and not error_message:
                 coupon_discount = recalculated_discount
             else:
-                # If coupon is no longer valid, treat as no coupon for Razorpay amount
                 coupon_discount = 0.0
         
         # Calculate product discount (per product group, not per cart item row)
         processed_groups = set()
         product_discount = 0.0
         for item in cart_items:
-            # Skip if product is deleted or missing
+            group_key = item.group_id or f"single_{item.id}"
+
+            # Blood test discount: listing_price - selling_price per member in group
+            if item.product_type == "blood_test" and item.thyrocare_product:
+                if group_key not in processed_groups:
+                    group_items = [ci for ci in cart_items if (ci.group_id or f"single_{ci.id}") == group_key]
+                    discount_per_member = max(0, item.thyrocare_product.listing_price - item.thyrocare_product.selling_price)
+                    product_discount += discount_per_member * len(group_items)
+                    processed_groups.add(group_key)
+                continue
+
+            # Skip if genetic product is deleted or missing
             if not item.product:
                 continue
-                
-            group_key = item.group_id or f"single_{item.id}"
+
             if group_key not in processed_groups:
                 discount_per_item = item.product.Price - item.product.SpecialPrice
                 product_discount += discount_per_item * item.quantity
@@ -463,6 +455,7 @@ def create_order(
                 placed_by_member_id=placed_by_member_id,
                 prevalidated_coupon_code=applied_coupon.coupon_code if applied_coupon and coupon_discount > 0 else None,
                 prevalidated_coupon_discount=coupon_discount,
+                thyrocare_confirmed_amount=thyrocare_confirmed_amount,
             )
             
             logger.info(f"Order {order.order_number} created for user {current_user.id}")
@@ -479,6 +472,26 @@ def create_order(
         # Re-raise HTTPException to preserve original status code (404, 400, etc.)
         db.rollback()
         raise
+    except RuntimeError as e:
+        db.rollback()
+        client_ip = get_client_info(request) if request else None
+        logger.error(
+            f"Order creation failed - External service error | "
+            f"User ID: {current_user.id} | Error: {str(e)} | IP: {client_ip}"
+        )
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
+    except ConnectionError as e:
+        db.rollback()
+        client_ip = get_client_info(request) if request else None
+        logger.error(
+            f"Order creation failed - Payment gateway unreachable | "
+            f"User ID: {current_user.id} | Error: {str(e)} | IP: {client_ip}",
+            exc_info=True
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(e)
+        )
     except ValueError as e:
         db.rollback()
         client_ip = get_client_info(request) if request else None
@@ -492,12 +505,12 @@ def create_order(
         client_ip = get_client_info(request) if request else None
         logger.error(
             f"Order creation failed - Unexpected error | "
-            f"User ID: {current_user.id} | Error: {str(e)} | IP: {client_ip}",
+            f"User ID: {current_user.id} | Error: {type(e).__name__}: {str(e)} | IP: {client_ip}",
             exc_info=True
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error creating order: {str(e)}"
+            detail=f"Unexpected error: {type(e).__name__}: {str(e)}"
         )
 
 
@@ -1022,12 +1035,12 @@ async def razorpay_webhook(
             # Get payment ID - use from database first (stored during frontend verification)
             razorpay_payment_id = payment.razorpay_payment_id
             
-            # Fallback: try to extract from webhook payload if not in database
+            # Get payment ID from the payment entity in the webhook payload (same as payment.captured)
             if not razorpay_payment_id:
-                payments = order_entity.get("payments", [])
-                if payments:
-                    razorpay_payment_id = payments[0]  # Use first payment
-                    logger.info(f"Extracted razorpay_payment_id from webhook payload for order {order.order_number}")
+                payment_entity_in_order_paid = webhook_data.get("payload", {}).get("payment", {}).get("entity", {})
+                razorpay_payment_id = payment_entity_in_order_paid.get("id")
+                if razorpay_payment_id:
+                    logger.info(f"Extracted razorpay_payment_id from payment entity for order {order.order_number}")
                 else:
                     logger.warning(f"No payment ID found in database or webhook for order {order.order_number}")
                     webhook_log.processed = True
@@ -1196,10 +1209,10 @@ def get_orders(
             # Fallback behavior: If group_id is None (old orders or invalid data),
             # group by product_id only. This maintains backward compatibility.
             if group_id:
-                group_key = f"{item.product_id}_{group_id}_{item.order_id}"
+                group_key = f"{item.product_id or item.thyrocare_product_id}_{group_id}_{item.order_id}"
             else:
                 # Backward compatibility: old orders created before group_id was implemented
-                group_key = f"{item.product_id}_{item.order_id}"
+                group_key = f"{item.product_id or item.thyrocare_product_id}_{item.order_id}"
             grouped_items[group_key].append(item)
         
         order_items = []
@@ -1217,11 +1230,11 @@ def get_orders(
             if snapshot and snapshot.product_data:
                 product_data = snapshot.product_data
                 product_name = product_data.get("Name", "Unknown")
-                product_id = product_data.get("ProductId", first_item.product_id)
+                product_id = product_data.get("ProductId") or product_data.get("thyrocare_product_id") or first_item.product_id
                 plan_type = product_data.get("plan_type")
             else:
                 product_name = first_item.product.Name if first_item.product else "Unknown"
-                product_id = first_item.product_id
+                product_id = first_item.product_id or first_item.thyrocare_product_id
                 if first_item.product and hasattr(first_item.product.plan_type, 'value'):
                     plan_type = first_item.product.plan_type.value
                 elif first_item.product:
@@ -1382,21 +1395,22 @@ def get_orders(
             # Calculate total_amount: price is per product group, not per member
             # For couple/family products, there are multiple order items but price is calculated once per product
             # This matches the cart calculation logic: quantity * unit_price (per product, not per member)
-            # IMPORTANT: When member switches and views orders, show full amount for family/couple plans, not split amount
-            # Use calculation_item which includes all items in the group, ensuring full plan amount is shown
-            item_total_amount = calculation_item.quantity * calculation_item.unit_price
-            
+            # Sum unit_price across all items in group (handles blood test multi-member correctly)
+            item_total_amount = sum(i.unit_price for i in items if i.unit_price)
+            if not item_total_amount:
+                item_total_amount = calculation_item.quantity * calculation_item.unit_price
+
             order_items.append({
                 "product_id": product_id,
                 "product_name": product_name,
-                "group_id": group_id,  # Group ID to distinguish different packs of same product
+                "group_id": group_id,
                 "member_ids": list(set(member_ids)),
                 "address_ids": unique_address_ids,
-                "member_address_map": member_address_map,  # Full details with member-address mapping
+                "member_address_map": member_address_map,
                 "quantity": calculation_item.quantity,
                 "total_amount": item_total_amount
             })
-        
+
         # Only include this order if it has items after filtering
         if not order_items:
             continue
@@ -1692,10 +1706,10 @@ def get_order(
         # Fallback behavior: If group_id is None (old orders or invalid data),
         # group by product_id only. This maintains backward compatibility.
         if group_id:
-            group_key = f"{item.product_id}_{group_id}_{order.id}"
+            group_key = f"{item.product_id or item.thyrocare_product_id}_{group_id}_{order.id}"
         else:
             # Backward compatibility: old orders created before group_id was implemented
-            group_key = f"{item.product_id}_{order.id}"
+            group_key = f"{item.product_id or item.thyrocare_product_id}_{order.id}"
         grouped_items[group_key].append(item)
     
     order_items = []
@@ -1713,11 +1727,11 @@ def get_order(
         if snapshot and snapshot.product_data:
             product_data = snapshot.product_data
             product_name = product_data.get("Name", "Unknown")
-            product_id = product_data.get("ProductId", first_item.product_id)
+            product_id = product_data.get("ProductId") or product_data.get("thyrocare_product_id") or first_item.product_id
             plan_type = product_data.get("plan_type")
         else:
             product_name = first_item.product.Name if first_item.product else "Unknown"
-            product_id = first_item.product_id
+            product_id = first_item.product_id or first_item.thyrocare_product_id
             if first_item.product and hasattr(first_item.product.plan_type, 'value'):
                 plan_type = first_item.product.plan_type.value
             elif first_item.product:
@@ -1870,17 +1884,18 @@ def get_order(
         # Calculate total_amount: price is per product group, not per member
         # For couple/family products, there are multiple order items but price is calculated once per product
         # This matches the cart calculation logic: quantity * unit_price (per product, not per member)
-        # IMPORTANT: When member switches and views orders, show full amount for family/couple plans, not split amount
-        # Use calculation_item which includes all items in the group, ensuring full plan amount is shown
-        item_total_amount = calculation_item.quantity * calculation_item.unit_price
-        
+        # Sum unit_price across all items in group (handles blood test multi-member correctly)
+        item_total_amount = sum(i.unit_price for i in items if i.unit_price)
+        if not item_total_amount:
+            item_total_amount = calculation_item.quantity * calculation_item.unit_price
+
         order_items.append({
             "product_id": product_id,
             "product_name": product_name,
-            "group_id": group_id,  # Group ID to distinguish different packs of same product
+            "group_id": group_id,
             "member_ids": list(set(member_ids)),
             "address_ids": unique_address_ids,
-            "member_address_map": member_address_map,  # Full details with member-address mapping
+            "member_address_map": member_address_map,
             "quantity": calculation_item.quantity,
             "total_amount": item_total_amount
         })
@@ -2031,13 +2046,13 @@ def get_order_tracking(
         # Get product details
         if snapshot and snapshot.product_data:
             product_data = snapshot.product_data
-            product_id = product_data.get("ProductId", item.product_id)
+            product_id = product_data.get("ProductId") or product_data.get("thyrocare_product_id") or item.product_id
             product_name = product_data.get("Name", "Unknown Product")
             plan_type = product_data.get("plan_type", None)
             unit_price = item.unit_price
         else:
             product_obj = item.product
-            product_id = product_obj.ProductId if product_obj else item.product_id
+            product_id = product_obj.ProductId if product_obj else (item.product_id or item.thyrocare_product_id)
             product_name = product_obj.Name if product_obj else "Unknown Product"
             plan_type = product_obj.plan_type.value if product_obj and hasattr(product_obj.plan_type, 'value') else (str(product_obj.plan_type) if product_obj else None)
             unit_price = item.unit_price
@@ -2152,15 +2167,13 @@ def get_order_tracking(
     # Sort order items by product_id to group related items together
     order_items_list.sort(key=lambda x: (x.product_id or 0, x.order_item_id))
     
-    # Calculate product discount (difference between subtotal and sum of unit prices)
-    # Sum unique products (since items with same product_id share the same price)
-    seen_products = set()
+    # Calculate product discount — use order_item_id as dedup key since product_id is None for blood tests
+    seen_items = set()
     total_product_prices = 0.0
     for item in order_items_list:
-        product_key = item.product_id
-        if product_key and product_key not in seen_products:
-            total_product_prices += item.quantity * item.unit_price
-            seen_products.add(product_key)
+        if item.order_item_id not in seen_items:
+            total_product_prices += item.unit_price
+            seen_items.add(item.order_item_id)
     
     product_discount = max(0.0, total_product_prices - order.subtotal) if order.subtotal else None
     
@@ -2321,11 +2334,11 @@ def get_order_item_tracking(
     if snapshot and snapshot.product_data:
         product_data = snapshot.product_data
         product = {
-            "product_id": product_data.get("ProductId", order_item.product_id),
+            "product_id": product_data.get("ProductId") or product_data.get("thyrocare_product_id") or order_item.product_id,
             "name": product_data.get("Name", "Unknown"),
-            "price": product_data.get("Price"),
-            "special_price": product_data.get("SpecialPrice"),
-            "plan_type": product_data.get("plan_type"),
+            "price": product_data.get("Price") or product_data.get("ListingPrice"),
+            "special_price": product_data.get("SpecialPrice") or product_data.get("SellingPrice"),
+            "plan_type": product_data.get("plan_type") or product_data.get("product_type"),
             "category": product_data.get("category"),
             "images": product_data.get("Images")
         }
@@ -3030,7 +3043,8 @@ async def test_invoice_email_generation(
             group_key = group_key or str(item.id)
 
             if group_key not in _groups:
-                _groups[group_key] = {"name": item_name, "amount": item.unit_price * item.quantity}
+                _groups[group_key] = {"name": item_name, "amount": 0}
+            _groups[group_key]["amount"] += item.unit_price if item.unit_price else 0
         invoice_items = list(_groups.values())
 
         # Prepare payment info — use the most recent COMPLETED payment, fallback to latest

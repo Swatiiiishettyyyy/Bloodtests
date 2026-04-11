@@ -12,10 +12,13 @@ from config import settings
 logger = logging.getLogger(__name__)
 
 
+import threading
+
 class ThyrocareService:
     _instance = None
     _token: Optional[str] = None
     _token_expiry: float = 0
+    _login_lock = threading.Lock()
 
     def __new__(cls):
         if cls._instance is None:
@@ -62,10 +65,14 @@ class ThyrocareService:
             except Exception:
                 self._token_expiry = time.time() + 86400
 
+            print(f"[THYROCARE AUTH] Token acquired successfully. Expires at: {self._token_expiry}")
             logger.info("Thyrocare login successful. Token acquired.")
             return True
         except Exception as e:
+            print(f"[THYROCARE AUTH] Login FAILED: {str(e)}")
             logger.error(f"Thyrocare login failed: {str(e)}")
+            self._token = None
+            self._token_expiry = 0
             return False
 
     def logout(self) -> bool:
@@ -87,8 +94,11 @@ class ThyrocareService:
     def get_token(self) -> Optional[str]:
         """Return a valid token, re-logging in if missing or expiring within 5 minutes."""
         if not self._token or time.time() > (self._token_expiry - 300):
-            if not self.login():
-                return None
+            with ThyrocareService._login_lock:
+                # Double-check after acquiring lock (another thread may have refreshed)
+                if not self._token or time.time() > (self._token_expiry - 300):
+                    if not self.login():
+                        return None
         return self._token
 
     def _auth_headers(self) -> Dict[str, str]:
@@ -141,6 +151,43 @@ class ThyrocareService:
             raise
         except Exception as e:
             logger.error(f"Thyrocare create-order error: {e}")
+            raise
+
+    def get_report(self, thyrocare_order_id: str, lead_id: str, report_type: str = "pdf") -> Dict[str, Any]:
+        """
+        Fetch diagnostic report URL for a patient.
+        GET /partners/v1/{orderId}/reports/{leadId}?type=pdf
+        Returns a pre-signed S3 URL valid for 10 minutes.
+        """
+        url = f"{settings.THYROCARE_BASE_URL}/partners/v1/{thyrocare_order_id}/reports/{lead_id}"
+        params = {"type": report_type}
+        try:
+            response = requests.get(url, params=params, headers=self._auth_headers())
+            response.raise_for_status()
+            return response.json()
+        except requests.HTTPError as e:
+            logger.error(f"Thyrocare get-report failed [{e.response.status_code}]: {e.response.text}")
+            raise
+        except Exception as e:
+            logger.error(f"Thyrocare get-report error: {e}")
+            raise
+
+    def get_order_details(self, thyrocare_order_id: str, include: str = "tracking,items,price") -> Dict[str, Any]:
+        """
+        Fetch full order details from Thyrocare.
+        GET /partners/v1/orders/{orderId}?include=tracking,items,price
+        """
+        url = f"{settings.THYROCARE_BASE_URL}/partners/v1/orders/{thyrocare_order_id}"
+        params = {"include": include}
+        try:
+            response = requests.get(url, params=params, headers=self._auth_headers())
+            response.raise_for_status()
+            return response.json()
+        except requests.HTTPError as e:
+            logger.error(f"Thyrocare get-order-details failed [{e.response.status_code}]: {e.response.text}")
+            raise
+        except Exception as e:
+            logger.error(f"Thyrocare get-order-details error: {e}")
             raise
 
     def get_order_status(self, thyrocare_order_id: str) -> Dict[str, Any]:
@@ -200,6 +247,52 @@ class ThyrocareService:
             logger.error(f"Thyrocare get-slots error: {e}")
             raise
 
+    def get_serviceable_pincodes(self) -> list:
+        """
+        Fetch all serviceable pincodes from Thyrocare.
+        GET /partners/v1/serviceability/pincodes
+        Returns list of pincode integers.
+        """
+        url = f"{settings.THYROCARE_BASE_URL}/partners/v1/serviceability/pincodes"
+        try:
+            response = requests.get(url, headers=self._auth_headers())
+            response.raise_for_status()
+            data = response.json()
+            # Response: {"serviceTypes": [{"type": "ALL", "pincodes": [110001, ...]}]}
+            pincodes = []
+            for service_type in data.get("serviceTypes", []):
+                pincodes.extend(service_type.get("pincodes", []))
+            return list(set(pincodes))
+        except requests.HTTPError as e:
+            logger.error(f"Thyrocare get-serviceable-pincodes failed [{e.response.status_code}]: {e.response.text}")
+            raise
+        except Exception as e:
+            logger.error(f"Thyrocare get-serviceable-pincodes error: {e}")
+            raise
+
+    def get_catalogue(self, min_price: float = 0, max_price: float = 10000, page: int = 1, page_size: int = 50) -> Dict[str, Any]:
+        """
+        Fetch available products from Thyrocare catalogue.
+        GET /partners/v1/catalog/products
+        """
+        url = f"{settings.THYROCARE_BASE_URL}/partners/v1/catalog/products"
+        params = {
+            "minPrice": int(min_price),
+            "maxPrice": int(max_price),
+            "page": page,
+            "pageSize": page_size,
+        }
+        try:
+            response = requests.get(url, params=params, headers=self._auth_headers())
+            response.raise_for_status()
+            return response.json()
+        except requests.HTTPError as e:
+            logger.error(f"Thyrocare get-catalogue failed [{e.response.status_code}]: {e.response.text}")
+            raise
+        except Exception as e:
+            logger.error(f"Thyrocare get-catalogue error: {e}")
+            raise
+
 
 # ------------------------------------------------------------------
 # Module-level helpers
@@ -226,26 +319,3 @@ def normalize_thyrocare_errors(response_data: Any) -> Dict[str, Any]:
         if errors and isinstance(errors, list):
             return {"message": errors[0].get("message", "Unknown Thyrocare error"), "raw": response_data}
     return {"message": str(response_data), "raw": response_data}
-
-    def get_catalogue(self, min_price: float = 0, max_price: float = 10000, page: int = 1, page_size: int = 50) -> Dict[str, Any]:
-        """
-        Fetch available products from Thyrocare catalogue.
-        GET /partners/v1/catalog/products
-        """
-        url = f"{settings.THYROCARE_BASE_URL}/partners/v1/catalog/products"
-        params = {
-            "minPrice": min_price,
-            "maxPrice": max_price,
-            "page": page,
-            "pageSize": page_size,
-        }
-        try:
-            response = requests.get(url, params=params, headers=self._auth_headers())
-            response.raise_for_status()
-            return response.json()
-        except requests.HTTPError as e:
-            logger.error(f"Thyrocare get-catalogue failed [{e.response.status_code}]: {e.response.text}")
-            raise
-        except Exception as e:
-            logger.error(f"Thyrocare get-catalogue error: {e}")
-            raise

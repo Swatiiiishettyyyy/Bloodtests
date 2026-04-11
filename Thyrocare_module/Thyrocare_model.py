@@ -32,6 +32,9 @@ class ThyrocareProduct(Base):
     is_fasting_required = Column(Boolean, nullable=True)
     is_home_collectible = Column(Boolean, nullable=True)
 
+    # Category
+    category = Column(String(200), nullable=True, index=True)
+
     # Content (manually filled)
     about = Column(Text, nullable=True)
     short_description = Column(String(500), nullable=True)
@@ -66,3 +69,13 @@ class ThyrocareTestParameter(Base):
     group_name = Column(String(200), nullable=True)
 
     product = relationship("ThyrocareProduct", back_populates="parameters")
+
+
+class ThyrocarePincode(Base):
+    """Serviceable pincodes fetched from Thyrocare serviceability API."""
+    __tablename__ = "thyrocare_pincodes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    pincode = Column(String(10), unique=True, nullable=False, index=True)
+    is_active = Column(Boolean, nullable=False, default=True, index=True)
+    synced_at = Column(DateTime(timezone=True), default=now_ist, nullable=False)
