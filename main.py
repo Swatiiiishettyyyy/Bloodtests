@@ -52,8 +52,11 @@ from Newsletter_module.Newsletter_model import NewsletterSubscription
 from Tracking_module.Tracking_model import TrackingRecord  # Location & Analytics Tracking
 from Account_module.Account_model import AccountFeedbackRequest
 from Enquiry_module.Enquiry_model import EnquiryRequest
+from Utm_tracking_module.Utm_tracking_model import UtmTracking
 from Notification_module.Notification_model import Notification, UserDeviceToken
 from Thyrocare_module.Thyrocare_model import ThyrocareProduct, ThyrocareTestParameter
+from Thyrocare_module.thyrocare_ref_order_counter_model import ThyrocareRefOrderCounter
+from Orders_module.order_number_counter_model import OrderNumberCounter
 
 # Import Google Meet API models to register with SQLAlchemy Base
 try:
@@ -86,6 +89,7 @@ from Notification_module.Notification_router import router as notification_route
 from Tracking_module.Tracking_router import router as tracking_router
 from Account_module.Account_router import router as account_router
 from Enquiry_module.Enquiry_router import router as enquiry_router
+from Utm_tracking_module.Utm_tracking_router import router as utm_tracking_router
 from Thyrocare_module.Thyrocare_router import router as thyrocare_router
 
 # Google Meet API router
@@ -626,6 +630,7 @@ app.include_router(phone_change_router)
 app.include_router(newsletter_router)  # /newsletter/subscribe
 app.include_router(notification_router)  # /api/notifications
 app.include_router(tracking_router)  # /api/tracking/event
+app.include_router(utm_tracking_router)  # /api/utm-tracking
 app.include_router(account_router)  # /account/feedback
 app.include_router(enquiry_router)  # /enquiry (form + POST)
 app.include_router(thyrocare_router)  # /thyrocare

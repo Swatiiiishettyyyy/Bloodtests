@@ -3,6 +3,27 @@ from typing import List, Optional
 from pydantic import BaseModel, Field, validator
 
 
+class ThyrocareAddressRequest(BaseModel):
+    """
+    Same shape as AddressRequest for Thyrocare flows: no serviceable-location or pincode-table checks.
+    Postal code is not restricted to 6 digits (stored up to DB column length).
+    """
+    address_id: int = Field(..., description="Address ID (use 0 for new address)", ge=0)
+    postal_code: str = Field(..., description="Postal code (pincode)", min_length=1, max_length=20)
+    address_label: str = Field(..., description="Address label (e.g., 'Home', 'Office')", min_length=1, max_length=50)
+    street_address: str = Field(..., description="Street address", min_length=1, max_length=255)
+    landmark: Optional[str] = Field(None, description="Landmark (optional)", max_length=255)
+    locality: str = Field(..., description="Locality", max_length=150)
+    city: str = Field(..., description="City", max_length=100)
+    state: str = Field(..., description="State", max_length=100)
+    country: str = Field(..., description="Country (defaults to India)", max_length=100)
+    save_for_future: bool = Field(..., description="Save address for future use")
+
+    @validator("postal_code")
+    def normalize_postal_code(cls, v):
+        return (v or "").strip()
+
+
 class AddressRequest(BaseModel):
     address_id: int = Field(..., description="Address ID (use 0 for new address)", ge=0)
     postal_code: str = Field(..., description="Postal code (pincode) - 6 digits", min_length=6, max_length=6)

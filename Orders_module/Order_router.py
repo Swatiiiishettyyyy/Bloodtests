@@ -4,7 +4,7 @@ Order router - handles order creation, payment, and tracking.
 from fastapi import APIRouter, Depends, Header, HTTPException, status, Request
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
-from typing import List, Optional
+from typing import List, Optional, Dict, Callable
 from collections import defaultdict
 import uuid
 import logging
@@ -42,10 +42,11 @@ from .razorpay_service import create_razorpay_order, verify_webhook_signature, g
 from .Order_model import OrderStatus, PaymentStatus, PaymentMethod, Order, OrderItem, Payment, PaymentTransition, WebhookLog
 from Cart_module.Cart_model import CartItem, Cart
 from Notification_module.Notification_crud import send_notification_to_user
+from config import settings
 import razorpay
 
-# Fixed password for PUT order status endpoint (admin/lab use)
-ORDER_STATUS_PASSWORD = "4567"
+# Admin password for PUT order status endpoint — set ORDER_STATUS_PASSWORD env var in production
+ORDER_STATUS_PASSWORD = settings.ORDER_STATUS_PASSWORD
 
 router = APIRouter(prefix="/orders", tags=["Orders"])
 
@@ -105,6 +106,46 @@ def extract_and_validate_group_id(snapshot) -> Optional[str]:
         return None
     
     return group_id
+
+
+def _thyrocare_line_extras_factory(db: Session, our_order_id: int, items: List[OrderItem]) -> Callable[[OrderItem], Dict]:
+    """
+    Build a per-line map for Thyrocare bookings on a nucleotide order.
+    Multiple products / visits => multiple thyrocare_order_id values; ref_order_no comes from thyrocare_order_tracking.
+    """
+    from Thyrocare_module.thyrocare_webhook_model import ThyrocareOrderTracking
+    from Thyrocare_module.Thyrocare_model import ThyrocareProduct
+
+    trackings = (
+        db.query(ThyrocareOrderTracking)
+        .filter(ThyrocareOrderTracking.our_order_id == our_order_id)
+        .all()
+    )
+    ref_by_tc_id: Dict[str, Optional[str]] = {}
+    for t in trackings:
+        if t.thyrocare_order_id:
+            ref_by_tc_id[str(t.thyrocare_order_id).strip()] = t.ref_order_no
+
+    tc_pids = {i.thyrocare_product_id for i in items if i.thyrocare_product_id}
+    catalog_id_by_row: Dict[int, str] = {}
+    if tc_pids:
+        for p in db.query(ThyrocareProduct).filter(ThyrocareProduct.id.in_(tc_pids)).all():
+            catalog_id_by_row[p.id] = p.thyrocare_id
+
+    def extras(item: OrderItem) -> Dict:
+        tid = item.thyrocare_order_id
+        tid_s = str(tid).strip() if tid else None
+        ref = ref_by_tc_id.get(tid_s) if tid_s else None
+        pid = item.thyrocare_product_id
+        return {
+            "thyrocare_order_id": tid_s,
+            "thyrocare_ref_order_no": ref,
+            "thyrocare_booking_status": item.thyrocare_booking_status,
+            "thyrocare_product_id": pid,
+            "thyrocare_catalog_product_id": catalog_id_by_row.get(pid) if pid else None,
+        }
+
+    return extras
 
 
 @router.post("/create", response_model=RazorpayOrderResponse)
@@ -188,6 +229,25 @@ def create_order(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Your cart is empty. Please add items to your cart before placing an order."
             )
+
+        # Blood tests (Thyrocare) require slot selection per group before checkout.
+        # Enforce this upfront so OrderSnapshot always contains appointment fields and booking
+        # never has to guess via cart fallback.
+        blood_groups_missing_slot = {}
+        for item in cart_items:
+            if getattr(item, "product_type", None) == "blood_test":
+                gk = item.group_id or f"single_{item.id}"
+                if not item.appointment_date or not item.appointment_start_time:
+                    blood_groups_missing_slot.setdefault(gk, []).append(item.id)
+
+        if blood_groups_missing_slot:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "message": "Appointment date and time must be set for each blood test before checkout.",
+                    "blood_test_groups_missing_slot": blood_groups_missing_slot,
+                },
+            )
         
         # Validate that the provided cart_id matches the user's active cart
         if cart and request_data.cart_id != cart.id:
@@ -244,13 +304,6 @@ def create_order(
                 grouped_items[group_key] = []
             grouped_items[group_key].append(item)
 
-        # Fetch confirmed Thyrocare amount internally (replaces frontend-passed thyrocare_confirmed_amount)
-        from Thyrocare_module.thyrocare_cart_service import get_thyrocare_confirmed_amount
-        thyrocare_confirmed_amount = get_thyrocare_confirmed_amount(db, cart_items)
-
-        # Track which blood test groups have already used thyrocare_confirmed_amount
-        blood_test_confirmed_used = False
-
         for group_key, items in grouped_items.items():
             # Skip if group is empty (should not happen, but safety check)
             if not items:
@@ -258,12 +311,11 @@ def create_order(
                 
             item = items[0]
 
-            # Blood test items: use Thyrocare-confirmed amount (authoritative, fetched internally)
+            # Blood test items: do NOT query Thyrocare cart/price-breakup for net payable.
+            # Use our catalog selling_price per member instead.
             if item.product_type == "blood_test" and item.thyrocare_product:
-                if not blood_test_confirmed_used:
-                    subtotal += thyrocare_confirmed_amount
-                    blood_test_confirmed_used = True
-                # subsequent blood test groups already counted in thyrocare_confirmed_amount (combined total)
+                unit_price = float(item.thyrocare_product.selling_price or 0)
+                subtotal += unit_price * len(items)
                 continue
 
             # Skip if genetic product is deleted or missing
@@ -432,40 +484,56 @@ def create_order(
             logger.info(f"Order {existing_order.order_number} updated for retry payment (user {current_user.id})")
             order = existing_order
         else:
-            # No existing order found - create new order
-            # Create Razorpay order first
+            # No pending checkout yet — create Razorpay order first, then PendingCheckout.
+            # The real Order row (with order number) is created ONLY after payment is confirmed.
             razorpay_order = create_razorpay_order(
                 amount=total_amount,
                 currency="INR",
-                receipt=f"order_{current_user.id}_{uuid.uuid4().hex[:8]}",
+                receipt=f"pc_{current_user.id}_{uuid.uuid4().hex[:8]}",
                 notes={
                     "user_id": str(current_user.id),
                     "address_id": str(primary_address_id) if primary_address_id else "None"
                 }
             )
-            
-            # Create order in database
+
+            from .Order_crud import create_pending_checkout
+            from .pending_checkout_model import PendingCheckout
             placed_by_member_id = current_member.id if current_member else None
-            order = create_order_from_cart(
+            pending = create_pending_checkout(
                 db=db,
                 user_id=current_user.id,
-                address_id=primary_address_id,
-                cart_item_ids=cart_item_ids,
                 razorpay_order_id=razorpay_order.get("id"),
+                amount=total_amount,
+                cart_item_ids=cart_item_ids,
+                address_id=primary_address_id,
                 placed_by_member_id=placed_by_member_id,
-                prevalidated_coupon_code=applied_coupon.coupon_code if applied_coupon and coupon_discount > 0 else None,
-                prevalidated_coupon_discount=coupon_discount,
-                thyrocare_confirmed_amount=thyrocare_confirmed_amount,
+                coupon_code=applied_coupon.coupon_code if applied_coupon and coupon_discount > 0 else None,
+                coupon_discount=coupon_discount,
             )
-            
-            logger.info(f"Order {order.order_number} created for user {current_user.id}")
-        
+            logger.info(
+                f"PendingCheckout {pending.id} created for user {current_user.id} "
+                f"(Razorpay order {razorpay_order.get('id')})"
+            )
+
+        # pending_checkout_id returned as order_id so the frontend contract is unchanged.
+        # The real order_id / order_number are returned by verify-payment after payment.
+        if existing_order:
+            # Retry path: existing_order is a real Order row — return its data
+            return RazorpayOrderResponse(
+                order_id=existing_order.id,
+                order_number=existing_order.order_number,
+                razorpay_order_id=razorpay_order.get("id"),
+                amount=total_amount,
+                currency="INR",
+                pending_checkout_id=None,  # legacy retry — no PendingCheckout
+            )
         return RazorpayOrderResponse(
-            order_id=order.id,
-            order_number=order.order_number,
+            order_id=pending.id,          # frontend sends this back as order_id in verify-payment
+            order_number=None,            # not yet — allocated on payment confirmation
             razorpay_order_id=razorpay_order.get("id"),
             amount=total_amount,
-            currency="INR"
+            currency="INR",
+            pending_checkout_id=pending.id,
         )
     
     except HTTPException:
@@ -529,71 +597,100 @@ def verify_payment(
     Cart clearing happens via webhook only.
     """
     try:
-        # First, verify order belongs to user BEFORE payment verification (security check)
         client_ip = get_client_info(request) if request else None
+        from .pending_checkout_model import PendingCheckout
+        from .Order_crud import create_order_post_payment
+
+        # --- NEW PATH: order_id refers to a PendingCheckout ---
+        pending = db.query(PendingCheckout).filter(
+            PendingCheckout.id == payment_data.order_id,
+            PendingCheckout.user_id == current_user.id,
+        ).first()
+
+        if pending:
+            # Validate razorpay_order_id matches the pending checkout
+            if pending.razorpay_order_id != payment_data.razorpay_order_id:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="razorpay_order_id does not match the checkout session."
+                )
+
+            # Idempotent: webhook already created the order
+            if pending.order_id:
+                order = db.query(Order).filter(Order.id == pending.order_id).first()
+                return PaymentVerificationResponse(
+                    status="success",
+                    message="Payment verified successfully. Order confirmed.",
+                    order_id=order.id,
+                    order_number=order.order_number,
+                    payment_status=order.payment_status.value,
+                    order_status=order.order_status.value,
+                )
+
+            # Create the real Order now — order number allocated here for the first time
+            order = create_order_post_payment(
+                db=db,
+                pending_checkout_id=pending.id,
+                razorpay_payment_id=payment_data.razorpay_payment_id,
+                razorpay_order_id=payment_data.razorpay_order_id,
+            )
+            logger.info(
+                f"Order {order.order_number} created post-payment for user {current_user.id} "
+                f"(PendingCheckout {pending.id})"
+            )
+            return PaymentVerificationResponse(
+                status="success",
+                message="Payment verified successfully. Order confirmed.",
+                order_id=order.id,
+                order_number=order.order_number,
+                payment_status=order.payment_status.value,
+                order_status=order.order_status.value,
+            )
+
+        # --- LEGACY PATH: order_id refers to an existing Order row (retry flow) ---
         order = db.query(Order).filter(Order.id == payment_data.order_id).first()
         if not order:
             logger.warning(
-                f"Payment verification failed - Order not found | "
-                f"Order ID: {payment_data.order_id} | User ID: {current_user.id} | IP: {client_ip}"
+                f"Payment verification failed - neither PendingCheckout nor Order found | "
+                f"ID: {payment_data.order_id} | User ID: {current_user.id} | IP: {client_ip}"
             )
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Order not found"
-            )
-        
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Checkout session not found.")
+
         if order.user_id != current_user.id:
-            logger.warning(
-                f"Payment verification failed - Unauthorized access attempt | "
-                f"Order ID: {payment_data.order_id} | Order User ID: {order.user_id} | "
-                f"Requesting User ID: {current_user.id} | IP: {client_ip}"
-            )
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Order does not belong to you"
-            )
-        
-        # Check if webhook already confirmed the order
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Order does not belong to you.")
+
         if order.order_status == OrderStatus.CONFIRMED:
-            logger.info(f"Order {order.order_number} already confirmed by webhook. Returning success.")
             return PaymentVerificationResponse(
                 status="success",
                 message="Payment verified successfully. Order confirmed.",
                 order_id=order.id,
                 order_number=order.order_number,
                 payment_status=order.payment_status.value if hasattr(order.payment_status, 'value') else str(order.payment_status),
-                order_status=order.order_status.value if hasattr(order.order_status, 'value') else str(order.order_status)
+                order_status=order.order_status.value if hasattr(order.order_status, 'value') else str(order.order_status),
             )
-        
-        # Verify payment (frontend verification - sets PROCESSING, waiting for webhook)
-        # Note: verify_payment_frontend commits the transaction internally
+
         from .Order_crud import verify_payment_frontend
         order = verify_payment_frontend(
             db=db,
             order_id=payment_data.order_id,
             razorpay_order_id=payment_data.razorpay_order_id,
             razorpay_payment_id=payment_data.razorpay_payment_id,
-            razorpay_signature=payment_data.razorpay_signature
+            razorpay_signature=payment_data.razorpay_signature,
         )
-        
-        # Refresh order to get latest state
         db.refresh(order)
-        
-        # Determine appropriate message based on status
-        if order.order_status == OrderStatus.CONFIRMED:
-            message = "Payment verified successfully. Order confirmed."
-        else:
-            message = "Payment verified successfully. Waiting for confirmation..."
-        
-        logger.info(f"Frontend payment verification successful for order {order.order_number} (user {current_user.id}). Payment status: {order.payment_status.value}")
-        
+        message = (
+            "Payment verified successfully. Order confirmed."
+            if order.order_status == OrderStatus.CONFIRMED
+            else "Payment verified successfully. Waiting for confirmation..."
+        )
+        logger.info(f"Legacy payment verification for order {order.order_number} (user {current_user.id})")
         return PaymentVerificationResponse(
             status="success",
             message=message,
             order_id=order.id,
             order_number=order.order_number,
             payment_status=order.payment_status.value,
-            order_status=order.order_status.value if hasattr(order.order_status, 'value') else str(order.order_status)
+            order_status=order.order_status.value if hasattr(order.order_status, 'value') else str(order.order_status),
         )
     
     except ValueError as e:
@@ -756,24 +853,56 @@ async def razorpay_webhook(
             from .Order_crud import extract_payment_method_from_razorpay_payload
             payment_method_details, payment_method_metadata = extract_payment_method_from_razorpay_payload(entity)
             
-            # Find payment by razorpay_order_id
+            # --- NEW PATH: look for a PendingCheckout (deferred order creation) ---
+            from .pending_checkout_model import PendingCheckout
+            from .Order_crud import create_order_post_payment
+
+            pending = db.query(PendingCheckout).filter(
+                PendingCheckout.razorpay_order_id == razorpay_order_id
+            ).first()
+
+            if pending:
+                webhook_log.processed = True
+                try:
+                    order = create_order_post_payment(
+                        db=db,
+                        pending_checkout_id=pending.id,
+                        razorpay_payment_id=razorpay_payment_id,
+                        razorpay_order_id=razorpay_order_id,
+                        webhook_log_id=webhook_log.id,
+                        payment_method_details=payment_method_details,
+                        payment_method_metadata=payment_method_metadata,
+                    )
+                    webhook_log.order_id = order.id
+                    webhook_log.processed_at = now_ist()
+                    db.commit()
+                    logger.info(
+                        f"Webhook created Order {order.order_number} from PendingCheckout {pending.id}"
+                    )
+                except Exception as exc:
+                    db.rollback()
+                    webhook_log.processing_error = str(exc)
+                    webhook_log.processed_at = now_ist()
+                    db.commit()
+                    logger.error(f"Webhook failed to create order from PendingCheckout {pending.id}: {exc}")
+                return WebhookResponse(status="success", message="Order created and confirmed.")
+
+            # --- LEGACY PATH: PendingCheckout not found, look for an existing Payment row ---
             payment = db.query(Payment).filter(
                 Payment.razorpay_order_id == razorpay_order_id
             ).order_by(Payment.created_at.desc()).first()
-            
+
             if not payment:
                 logger.warning(f"Payment not found for Razorpay order ID: {razorpay_order_id}")
-                # Update webhook log
                 webhook_log.processed = True
                 webhook_log.processing_error = f"Payment not found for Razorpay order ID: {razorpay_order_id}"
                 webhook_log.processed_at = now_ist()
                 db.commit()
-                # Return 200 OK so Razorpay doesn't retry (payment doesn't exist)
                 return WebhookResponse(
                     status="success",
                     message=f"Payment not found for Razorpay order ID: {razorpay_order_id}"
                 )
-            
+
             # Update webhook log with payment info
             webhook_log.payment_id = payment.id
             webhook_log.order_id = payment.order_id
@@ -1676,6 +1805,8 @@ def get_order(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Order not found"
         )
+
+    thyrocare_extras = _thyrocare_line_extras_factory(db, order.id, list(order.items))
     
     # Group order items by product AND group_id to distinguish different packs of same product
     # We'll filter by member later, after checking plan types
@@ -1871,7 +2002,8 @@ def get_order(
                 "status_updated_at": to_ist_isoformat(item.status_updated_at),
                 "scheduled_date": to_ist_isoformat(item.scheduled_date),
                 "technician_name": item.technician_name,
-                "technician_contact": item.technician_contact
+                "technician_contact": item.technician_contact,
+                **thyrocare_extras(item),
             })
             
             member_ids.append(member_details["member_id"])
@@ -1889,6 +2021,16 @@ def get_order(
         if not item_total_amount:
             item_total_amount = calculation_item.quantity * calculation_item.unit_price
 
+        _tc_ids_ordered: List[str] = []
+        _seen_tc: set = set()
+        for _i in items_to_display:
+            _tid = _i.thyrocare_order_id
+            if _tid:
+                _ts = str(_tid).strip()
+                if _ts and _ts not in _seen_tc:
+                    _seen_tc.add(_ts)
+                    _tc_ids_ordered.append(_ts)
+
         order_items.append({
             "product_id": product_id,
             "product_name": product_name,
@@ -1897,7 +2039,8 @@ def get_order(
             "address_ids": unique_address_ids,
             "member_address_map": member_address_map,
             "quantity": calculation_item.quantity,
-            "total_amount": item_total_amount
+            "total_amount": item_total_amount,
+            "thyrocare_order_ids": _tc_ids_ordered,
         })
     
     # Check if we have any items after filtering
@@ -2038,6 +2181,7 @@ def get_order_tracking(
                 }
     
     # Build order items list - clean mapping of member, address, product, and status
+    thyrocare_extras = _thyrocare_line_extras_factory(db, order.id, list(order.items))
     order_items_list = []
     
     for item in order_items_to_process:
@@ -2161,7 +2305,8 @@ def get_order_tracking(
             technician_name=item.technician_name,
             technician_contact=item.technician_contact,
             created_at=to_ist_isoformat(item.created_at),
-            status_history=item_status_history
+            status_history=item_status_history,
+            **thyrocare_extras(item),
         ))
     
     # Sort order items by product_id to group related items together
@@ -2373,6 +2518,7 @@ def get_order_item_tracking(
     # Sort status history by created_at (most recent first) for display
     item_status_history.sort(key=lambda x: x.get("created_at") or "", reverse=True)
     
+    thyrocare_extras = _thyrocare_line_extras_factory(db, order.id, list(order.items))
     return {
         "order_id": order.id,
         "order_number": order.order_number,
@@ -2387,7 +2533,8 @@ def get_order_item_tracking(
         "unit_price": order_item.unit_price,
         "scheduled_date": to_ist_isoformat(order_item.scheduled_date),
         "technician_name": order_item.technician_name,
-        "technician_contact": order_item.technician_contact
+        "technician_contact": order_item.technician_contact,
+        **thyrocare_extras(order_item),
     }
 
 

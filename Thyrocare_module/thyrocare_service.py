@@ -56,13 +56,19 @@ class ThyrocareService:
             response.raise_for_status()
             data = response.json()
             self._token = data.get("token")
+            if not self._token:
+                logger.error("Thyrocare login response did not include a token. Response keys: %s", list(data.keys()))
+                self._token = None
+                self._token_expiry = 0
+                return False
 
             # Decode JWT expiry; fall back to 24 h if parsing fails
             try:
                 import jwt
                 decoded = jwt.decode(self._token, options={"verify_signature": False})
                 self._token_expiry = decoded.get("exp", time.time() + 86400)
-            except Exception:
+            except Exception as jwt_err:
+                logger.warning("Could not decode Thyrocare JWT expiry (%s); defaulting to 24h", jwt_err)
                 self._token_expiry = time.time() + 86400
 
             print(f"[THYROCARE AUTH] Token acquired successfully. Expires at: {self._token_expiry}")
@@ -156,21 +162,43 @@ class ThyrocareService:
     def get_report(self, thyrocare_order_id: str, lead_id: str, report_type: str = "pdf") -> Dict[str, Any]:
         """
         Fetch diagnostic report URL for a patient.
-        GET /partners/v1/{orderId}/reports/{leadId}?type=pdf
-        Returns a pre-signed S3 URL valid for 10 minutes.
+        Tries GET /partners/v1/{orderId}/reports/{leadId} then
+        /partners/v1/orders/{orderId}/reports/{leadId} (404 on the first is retried).
+        Returns JSON that typically includes a short-lived report URL.
         """
-        url = f"{settings.THYROCARE_BASE_URL}/partners/v1/{thyrocare_order_id}/reports/{lead_id}"
         params = {"type": report_type}
-        try:
-            response = requests.get(url, params=params, headers=self._auth_headers())
-            response.raise_for_status()
-            return response.json()
-        except requests.HTTPError as e:
-            logger.error(f"Thyrocare get-report failed [{e.response.status_code}]: {e.response.text}")
-            raise
-        except Exception as e:
-            logger.error(f"Thyrocare get-report error: {e}")
-            raise
+        headers = self._auth_headers()
+        paths = (
+            f"{settings.THYROCARE_BASE_URL}/partners/v1/{thyrocare_order_id}/reports/{lead_id}",
+            f"{settings.THYROCARE_BASE_URL}/partners/v1/orders/{thyrocare_order_id}/reports/{lead_id}",
+        )
+        last_http: Optional[requests.HTTPError] = None
+        for url in paths:
+            try:
+                response = requests.get(url, params=params, headers=headers)
+                response.raise_for_status()
+                return response.json()
+            except requests.HTTPError as e:
+                last_http = e
+                if e.response is not None and e.response.status_code == 404:
+                    continue
+                logger.error(
+                    "Thyrocare get-report failed [%s]: %s",
+                    e.response.status_code if e.response else "?",
+                    e.response.text if e.response else "",
+                )
+                raise
+            except Exception as e:
+                logger.error(f"Thyrocare get-report error: {e}")
+                raise
+        if last_http is not None:
+            logger.error(
+                "Thyrocare get-report failed [%s]: %s",
+                last_http.response.status_code if last_http.response else "?",
+                last_http.response.text if last_http.response else "",
+            )
+            raise last_http
+        raise RuntimeError("Thyrocare get-report: no request was made")
 
     def get_order_details(self, thyrocare_order_id: str, include: str = "tracking,items,price") -> Dict[str, Any]:
         """

@@ -8,6 +8,35 @@ class MemberAddressMapping(BaseModel):
     address_id: int = Field(..., description="Address ID for this member", gt=0)
 
 
+class GeneticSlotSet(BaseModel):
+    """
+    Set (or update) the appointment slot for a single genetic test cart item.
+    Each member in a genetic group gets their own slot independently.
+    The time range (e.g. 9–10 am) is represented by start + end time strings.
+    """
+    appointment_date: date = Field(..., description="Collection date (YYYY-MM-DD)")
+    appointment_start_time: str = Field(..., description="Slot start time, e.g. '09:00'")
+    appointment_end_time: str = Field(..., description="Slot end time, e.g. '10:00'")
+
+    @validator("appointment_start_time", "appointment_end_time")
+    def valid_time_format(cls, v):
+        import re
+        if not re.match(r"^\d{2}:\d{2}$", v):
+            raise ValueError("Time must be in HH:MM format, e.g. '09:00'")
+        h, m = v.split(":")
+        if not (0 <= int(h) <= 23 and 0 <= int(m) <= 59):
+            raise ValueError("Invalid time value")
+        return v
+
+
+class GeneticSlotClear(BaseModel):
+    """Clear the slot for one or all members in a genetic group."""
+    clear_all_in_group: bool = Field(
+        False,
+        description="If True, clears slots for all members in the same group_id"
+    )
+
+
 class BloodTestMemberMapping(BaseModel):
     """Each member for a blood test shares the same address (home collection)"""
     member_id: int = Field(..., description="Member ID", gt=0)

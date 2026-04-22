@@ -1,26 +1,23 @@
 from Orders_module.Order_model import OrderStatus
 
+
 def _map_thyrocare_status(thyro_status: str) -> OrderStatus:
     """
-    Maps Thyrocare specific order status to our internal OrderStatus enum.
+    Maps Thyrocare orderStatus to our internal OrderStatus enum.
+
+    IMPORTANT: Blood test order status is owned by ThyrocareOrderTracking, NOT by
+    order_items.order_status. This function is only used for the CANCELLED propagation
+    path in _sync_nucleotide_order_from_thyrocare_webhook (which is otherwise a no-op).
+
+    Frontend display for blood tests uses _THYROCARE_STATUS_INFO in Thyrocare_router.py.
+    Frontend display for genetic tests uses order_items.order_status directly.
     """
     status_map = {
-        "YET TO ASSIGN": OrderStatus.CONFIRMED,
-        "ASSIGNED": OrderStatus.SCHEDULED,
-        "ACCEPTED": OrderStatus.SCHEDULED,
-        "STARTED": OrderStatus.SCHEDULE_CONFIRMED_BY_LAB,
-        "ARRIVED": OrderStatus.SAMPLE_COLLECTED,
-        "CONFIRMED": OrderStatus.SAMPLE_COLLECTED,
-        "DONE": OrderStatus.REPORT_READY,
-        "REPORTED": OrderStatus.REPORT_READY,
-        "CANCELLED": OrderStatus.PAYMENT_FAILED,  # closest terminal failure state available
+        "CANCELLED": OrderStatus.CANCELLED,
     }
-    
-    return status_map.get(thyro_status.upper(), OrderStatus.CONFIRMED)
+    return status_map.get(thyro_status.upper().strip(), OrderStatus.CONFIRMED)
+
 
 def _is_terminal_state(thyro_status: str) -> bool:
-    """
-    Determines if a status represents a completed or cancelled order.
-    """
     terminal_statuses = ["DONE", "REPORTED", "CANCELLED"]
     return thyro_status.upper() in terminal_statuses

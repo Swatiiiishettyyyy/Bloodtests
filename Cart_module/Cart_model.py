@@ -60,9 +60,12 @@ class CartItem(Base):
     # For couple/family/multi-beneficiary products: link multiple cart items together
     group_id = Column(String(100), nullable=False, index=True)
 
-    # Blood test appointment (only set when product_type = BLOOD_TEST)
+    # Appointment slot fields
+    # Blood test: appointment_date + appointment_start_time (shared across group)
+    # Genetic test: appointment_date + appointment_start_time + appointment_end_time (per member)
     appointment_date = Column(Date, nullable=True)
     appointment_start_time = Column(String(20), nullable=True)  # e.g. "09:00"
+    appointment_end_time = Column(String(20), nullable=True)    # e.g. "10:00" (genetic only)
 
     # Soft delete flag
     is_deleted = Column(Boolean, nullable=False, default=False, index=True)

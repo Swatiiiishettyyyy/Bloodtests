@@ -167,6 +167,10 @@ def should_exempt_from_csrf(path: str) -> bool:
     # Exempt tracking endpoints (analytics/tracking endpoint, no CSRF required)
     if path.startswith("/api/tracking/"):
         return True
+
+    # Exempt UTM landing tracking (anonymous / pre-auth)
+    if path.startswith("/api/utm-tracking"):
+        return True
     
     # Exempt order status endpoints (typically used by admin/lab technicians)
     if "/status" in path and ("/order" in path or path.startswith("/order")):

@@ -9,15 +9,26 @@ from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks, Query
 from sqlalchemy.orm import Session
+import json
+
+from sqlalchemy import func, or_
+from sqlalchemy.exc import IntegrityError
 
 from config import settings
 from database import Base  # noqa: F401 - needed to register models
 from deps import get_db
 from Login_module.Utils.auth_user import get_current_user
+from Login_module.Utils.rate_limiter import get_client_ip
 from Login_module.User.user_model import User
 from Address_module.Address_model import Address
+from Address_module.Address_crud import save_address
+from Address_module.Address_schema import AddressResponse, ThyrocareAddressRequest
 from Member_module.Member_model import Member
 from Cart_module.Cart_model import Cart, CartItem, ProductType
+from Cart_module.blood_test_cart_utils import (
+    retire_superseded_blood_test_lines,
+    filter_latest_blood_test_group_per_product,
+)
 from Orders_module.Order_model import OrderItem
 
 from .Thyrocare_model import ThyrocareProduct, ThyrocarePincode
@@ -153,6 +164,65 @@ def update_thyrocare_product(
 
 
 # ------------------------------------------------------------------ #
+# Address (Thyrocare — same Address row and audit as /address/save; no serviceability or cart-edit lock)
+# ------------------------------------------------------------------ #
+
+
+@router.post("/address/save", response_model=AddressResponse)
+def thyrocare_save_address_api(
+    req: ThyrocareAddressRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Create or update a user address for Thyrocare (address_id=0 to create).
+    Skips serviceable city/pincode checks and allows editing while the address is on a cart.
+    """
+    correlation_id = str(uuid.uuid4())
+    client_ip = get_client_ip(request)
+    address = save_address(
+        db,
+        current_user,
+        req,
+        request=request,
+        correlation_id=correlation_id,
+        skip_serviceability_validation=True,
+        skip_cart_lock_when_editing=True,
+    )
+    if not address:
+        logger.error(
+            "Thyrocare address save failed — unable to create/update | "
+            "User ID: %s | Address ID: %s | IP: %s",
+            current_user.id,
+            req.address_id,
+            client_ip,
+        )
+        raise HTTPException(
+            status_code=404,
+            detail="We couldn't find the address you're trying to edit.",
+        )
+
+    return {
+        "status": "success",
+        "message": "Address saved successfully.",
+        "data": {
+            "address_id": address.id,
+            "user_id": current_user.id,
+            "address_label": address.address_label,
+            "street_address": address.street_address,
+            "landmark": address.landmark,
+            "locality": address.locality,
+            "city": address.city,
+            "state": address.state,
+            "postal_code": address.postal_code,
+            "country": address.country,
+            "save_for_future": address.save_for_future,
+        },
+    }
+
+
+# ------------------------------------------------------------------ #
 # Serviceability / slots (proxy to Thyrocare API)
 # ------------------------------------------------------------------ #
 
@@ -179,6 +249,14 @@ def search_slots(
     if not items:
         raise HTTPException(status_code=404, detail="Cart group not found.")
 
+    addr_ids = {i.address_id for i in items if i.address_id is not None}
+    if len(addr_ids) > 1:
+        raise HTTPException(
+            status_code=422,
+            detail="All members in this cart group must use the same address for slot search. "
+            "Use separate cart groups if collections are at different addresses.",
+        )
+
     first_item = items[0]
 
     # Load product
@@ -198,7 +276,7 @@ def search_slots(
     if not address:
         raise HTTPException(status_code=404, detail="Address not found for this cart group.")
 
-    pincode = address.postal_code.replace(" ", "")
+    pincode = "".join(filter(str.isdigit, address.postal_code or ""))
 
     # Build list of dates to fetch
     today = date_type.today()
@@ -336,26 +414,8 @@ def add_blood_test_to_cart(
     if len(members) != num_members:
         raise HTTPException(status_code=422, detail="One or more members not found in your account.")
 
-    # Check if same product + same members already in cart
-    existing = db.query(CartItem).filter(
-        CartItem.user_id == current_user.id,
-        CartItem.thyrocare_product_id == item.thyrocare_product_id,
-        CartItem.product_type == ProductType.BLOOD_TEST,
-        CartItem.is_deleted == False,
-        CartItem.member_id.in_(item.member_ids),
-    ).all()
-    if existing:
-        # Block if ANY of the requested members already has this product in cart
-        conflicting_member_ids = {ci.member_id for ci in existing}
-        conflicting = conflicting_member_ids.intersection(set(item.member_ids))
-        if conflicting:
-            # Get member names for a helpful error message
-            conflicting_members = [m for m in members if m.id in conflicting]
-            names = ", ".join(m.name for m in conflicting_members)
-            raise HTTPException(
-                status_code=422,
-                detail=f"The following member(s) already have this blood test in their cart: {names}. Please remove the existing item first."
-            )
+    # One active line per product: retire older groups / duplicates before adding
+    retire_superseded_blood_test_lines(db, current_user.id, item.thyrocare_product_id)
 
     cart = _get_or_create_cart(db, current_user.id)
     group_id = f"bt_{current_user.id}_{product.id}_{uuid.uuid4().hex}"
@@ -473,7 +533,10 @@ def get_all_active_carts(
     if not all_items:
         return {"status": "success", "data": {"groups": [], "total_groups": 0}}
 
-    # Group by thyrocare_product_id — pick latest group_id per product
+    # Same rule as GET /cart/view: one active group per product (newest by row timestamps)
+    all_items = filter_latest_blood_test_group_per_product(all_items)
+
+    # One row per product after filter — group by group_id for response shape
     product_to_latest_group: dict = {}
     for ci in all_items:
         pid = ci.thyrocare_product_id
@@ -523,9 +586,8 @@ def upsert_blood_test_cart(
 ):
     """
     Upsert a blood test cart group.
-    - If group_id provided: soft-deletes old items for that group and creates fresh ones.
-    - If no group_id: behaves like a fresh add (checks for existing conflicts first).
-    Handles member/address changes cleanly without orphaned rows or 422 conflicts.
+    Soft-deletes all active rows for this user+product (any group_id), then inserts the new group.
+    Preserves client group_id when provided. Avoids duplicate or superseded lines in /cart/view.
     """
     product = db.query(ThyrocareProduct).filter(
         ThyrocareProduct.id == item.thyrocare_product_id,
@@ -560,21 +622,8 @@ def upsert_blood_test_cart(
         raise HTTPException(status_code=422, detail="One or more members not found in your account.")
 
     try:
-        if item.group_id:
-            # Soft-delete old items for this group
-            db.query(CartItem).filter(
-                CartItem.group_id == item.group_id,
-                CartItem.user_id == current_user.id,
-                CartItem.is_deleted == False,
-            ).update({"is_deleted": True})
-        else:
-            # No group_id — soft-delete any existing active items for this product+user
-            db.query(CartItem).filter(
-                CartItem.user_id == current_user.id,
-                CartItem.thyrocare_product_id == item.thyrocare_product_id,
-                CartItem.product_type == ProductType.BLOOD_TEST,
-                CartItem.is_deleted == False,
-            ).update({"is_deleted": True})
+        # Retire every active row for this product (any group_id) so upsert never leaves stale groups
+        retire_superseded_blood_test_lines(db, current_user.id, item.thyrocare_product_id)
 
         cart = _get_or_create_cart(db, current_user.id)
         group_id = item.group_id or f"bt_{current_user.id}_{product.id}_{uuid.uuid4().hex}"
@@ -618,6 +667,42 @@ def upsert_blood_test_cart(
             "price_per_member": product.selling_price,
             "total_amount": product.selling_price * num_members,
         },
+    }
+
+
+@router.delete("/cart/product/{thyrocare_product_id}")
+def remove_blood_test_product_from_cart(
+    thyrocare_product_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Remove all active cart rows for a blood test product for the current user.
+    Call this when the user deselects a product on the cart page.
+    Soft-deletes every CartItem row for this (user, product) pair regardless of group or member count.
+    Returns 404 if no active rows exist (idempotent — safe to call even if already removed).
+    """
+    deleted = db.query(CartItem).filter(
+        CartItem.user_id == current_user.id,
+        CartItem.thyrocare_product_id == thyrocare_product_id,
+        CartItem.product_type == ProductType.BLOOD_TEST,
+        CartItem.is_deleted == False,
+    ).all()
+
+    if not deleted:
+        raise HTTPException(status_code=404, detail="No active cart entry found for this product.")
+
+    for item in deleted:
+        item.is_deleted = True
+
+    from Cart_module.coupon_service import remove_coupon_from_cart
+    remove_coupon_from_cart(db, current_user.id)
+    db.commit()
+
+    return {
+        "status": "success",
+        "message": "Product removed from cart.",
+        "removed_count": len(deleted),
     }
 
 
@@ -717,7 +802,7 @@ def cart_price_breakup(
                 ]
             })
 
-        incentive_value = int(product.notational_incentive)
+        incentive_value = int(product.notational_incentive or 0)
         total_incentive_value += incentive_value * len(items)
         group_summaries.append({
             "group_id": group_id,
@@ -803,16 +888,52 @@ def create_thyrocare_order(
     - Call /cart/price-breakup first to confirm pricing
     """
     from Orders_module.Order_model import Order as OrderModel
+    from Thyrocare_module.thyrocare_booking_service import book_thyrocare_for_order
 
-    # Auto-generate ref_order_no from internal order or UUID
     if payload.order_id:
         internal_order = db.query(OrderModel).filter(
             OrderModel.id == payload.order_id,
             OrderModel.user_id == current_user.id
         ).first()
-        ref_order_no = internal_order.order_number[:25] if internal_order else f"NUC{current_user.id}{uuid.uuid4().hex[:10].upper()}"
-    else:
-        ref_order_no = f"NUC{current_user.id}{uuid.uuid4().hex[:10].upper()}"
+        if not internal_order:
+            raise HTTPException(status_code=404, detail="Order not found.")
+
+        # Preferred path (post-payment): use the same booking logic as the Razorpay webhook so that
+        # multi-product + multi-patient + per-visit bucketing remains consistent everywhere.
+        #
+        # This endpoint stays for backward compatibility with existing clients that explicitly call
+        # /thyrocare/orders/create after payment, but it must not build a separate single-product payload.
+        book_thyrocare_for_order(db, internal_order)
+
+        # Return Thyrocare order ids relevant to this cart group (best-effort via order snapshots).
+        from Orders_module.Order_model import OrderSnapshot
+        relevant_item_ids = []
+        for oi in db.query(OrderItem).filter(
+            OrderItem.order_id == internal_order.id,
+            OrderItem.thyrocare_product_id != None,
+        ).all():
+            snap = db.query(OrderSnapshot).filter(OrderSnapshot.id == oi.snapshot_id).first()
+            group_id = None
+            if snap and isinstance(snap.cart_item_data, dict):
+                group_id = snap.cart_item_data.get("group_id")
+            if group_id == payload.group_id:
+                relevant_item_ids.append(oi.id)
+
+        booked_ids = set()
+        for oi in db.query(OrderItem).filter(OrderItem.id.in_(relevant_item_ids)).all():
+            if oi.thyrocare_order_id:
+                booked_ids.add(str(oi.thyrocare_order_id).strip())
+
+        return {
+            "status": "success",
+            "message": "Thyrocare booking processed for this order.",
+            "data": {
+                "order_id": internal_order.id,
+                "group_id": payload.group_id,
+                "thyrocare_order_ids": sorted(booked_ids),
+                "booked_items_count": len(relevant_item_ids),
+            },
+        }
 
     # Load cart items for this group
     items = db.query(CartItem).filter(
@@ -865,8 +986,20 @@ def create_thyrocare_order(
 
         gender = gender_map.get(str(member.gender).upper(), "MALE")
         email = member.email or current_user.email or "noreply@nucleotide.life"
-        mobile = member.mobile or current_user.mobile or ""
-        normalized_mobile = normalize_mobile(mobile) if mobile else normalize_mobile(current_user.mobile or "")
+        from Login_module.Utils.phone_encryption import decrypt_phone as _decrypt_phone
+
+        def _safe_decrypt_mobile(val):
+            if not val:
+                return ""
+            try:
+                return _decrypt_phone(val)
+            except Exception:
+                return val
+
+        raw_mobile = member.mobile or current_user.mobile or ""
+        mobile = _safe_decrypt_mobile(raw_mobile)
+        user_raw_mobile = _safe_decrypt_mobile(current_user.mobile or "")
+        normalized_mobile = normalize_mobile(mobile) if mobile else normalize_mobile(user_raw_mobile)
         if not normalized_mobile or normalized_mobile == "+91-":
             raise HTTPException(status_code=422, detail=f"Member '{member.name}' has no valid mobile number.")
 
@@ -896,10 +1029,25 @@ def create_thyrocare_order(
             "documents": []
         })
 
-    # Format contact number for order level
-    user_mobile = normalize_mobile(current_user.mobile or "")
+    # Format contact number for order level (decrypt first — stored encrypted)
+    from Login_module.Utils.phone_encryption import decrypt_phone as _decrypt_phone_user
+
+    def _safe_decrypt_user_mobile(val):
+        if not val:
+            return ""
+        try:
+            return _decrypt_phone_user(val)
+        except Exception:
+            return val
+
+    user_mobile = normalize_mobile(_safe_decrypt_user_mobile(current_user.mobile or ""))
     if not user_mobile or user_mobile == "+91-":
         raise HTTPException(status_code=422, detail="User account has no valid mobile number.")
+
+    from Thyrocare_module.thyrocare_ref_order_crud import allocate_next_thyrocare_ref_order_no
+
+    # Sequential partner ref (2627001001, 2627001002, ...); not the internal ORD* order_number
+    ref_order_no = allocate_next_thyrocare_ref_order_no(db)
 
     # Build order payload per Thyrocare spec
     order_payload = {
@@ -912,7 +1060,7 @@ def create_thyrocare_order(
             "city": address.city,
             "state": address.state,
             "country": address.country,
-            "pincode": int(address.postal_code.replace(" ", ""))
+            "pincode": int("".join(filter(str.isdigit, address.postal_code or "")) or "0")
         },
         "email": current_user.email or "noreply@nucleotide.life",
         "contactNumber": user_mobile,
@@ -958,7 +1106,7 @@ def create_thyrocare_order(
             "discounts": [{"type": "COUPON", "code": "0"}],
             "incentivePasson": {
                 "type": "FLAT",
-                "value": int(float(payload.incentive_passon_value)) if payload.incentive_passon_value else int(product.notational_incentive)
+                "value": int(float(payload.incentive_passon_value)) if payload.incentive_passon_value else int(product.notational_incentive or 0)
             }
         },
         "orderOptions": {
@@ -1280,10 +1428,179 @@ def sync_thyrocare_pincodes(
     }
 
 
-def _fetch_and_store_lab_results(thyrocare_order_id: str, patient_id: str, report_url_from_payload: str = None) -> None:
+def _report_url_looks_like_pdf(url: str) -> bool:
+    if not url or not isinstance(url, str):
+        return False
+    base = url.lower().split("?", 1)[0]
+    return base.endswith(".pdf")
+
+
+def _upload_thyrocare_report_pdf_to_s3(thyrocare_order_id: str, patient_id_key: str) -> None:
     """
-    Background task — fetches XML report from Thyrocare and stores parsed results.
-    Uses reportUrl from webhook payload if available, otherwise fetches from Thyrocare API.
+    After XML ingestion, call Thyrocare report API with type=pdf, download bytes, upload to reports bucket.
+    Stores report_pdf_s3_key for presigned downloads (private buckets). Clears report_pdf_s3_url.
+    """
+    from database import SessionLocal
+    import requests as _req
+
+    from Thyrocare_module.thyrocare_report_s3_service import get_thyrocare_report_s3_service
+
+    s3svc = get_thyrocare_report_s3_service()
+    if not s3svc.is_configured():
+        logger.warning(
+            "S3_THYROCARE_REPORTS_BUCKET not set; skipping report PDF upload (order=%s patient=%s)",
+            thyrocare_order_id,
+            patient_id_key,
+        )
+        return
+
+    db = SessionLocal()
+    try:
+        patient = db.query(ThyrocarePatientTracking).filter(
+            ThyrocarePatientTracking.thyrocare_order_id == thyrocare_order_id,
+            ThyrocarePatientTracking.patient_id == patient_id_key,
+        ).first()
+        if patient and patient.report_pdf_s3_key:
+            return
+
+        service = ThyrocareService()
+        report_data = service.get_report(thyrocare_order_id, patient_id_key, report_type="pdf")
+        pdf_url = report_data.get("reportUrl") or report_data.get("url")
+        if not pdf_url:
+            logger.warning(
+                "No PDF report URL from Thyrocare API (order=%s patient=%s)",
+                thyrocare_order_id,
+                patient_id_key,
+            )
+            return
+
+        pdf_resp = _req.get(pdf_url, timeout=60)
+        pdf_resp.raise_for_status()
+        body = pdf_resp.content
+        if not body or not body.lstrip().startswith(b"%PDF"):
+            logger.warning(
+                "Downloaded body is not a PDF for order=%s patient=%s",
+                thyrocare_order_id,
+                patient_id_key,
+            )
+            return
+
+        member_for_key = patient.member_id if patient else None
+
+        s3_key = s3svc.upload_report_pdf(
+            member_id=member_for_key,
+            patient_id=patient_id_key,
+            file_content=body,
+            thyrocare_order_id=thyrocare_order_id,
+        )
+
+        if patient:
+            patient.report_pdf_s3_key = s3_key
+            patient.report_pdf_s3_url = None
+            db.commit()
+    except Exception as e:
+        logger.error(
+            "Thyrocare report PDF S3 upload failed (order=%s patient=%s): %s",
+            thyrocare_order_id,
+            patient_id_key,
+            e,
+            exc_info=True,
+        )
+        db.rollback()
+    finally:
+        db.close()
+
+
+def _sync_nucleotide_order_from_thyrocare_webhook(
+    db: Session,
+    our_order_id: Optional[int],
+    thyrocare_order_id: str,
+    thyrocare_status_str: str,
+) -> None:
+    """
+    Blood test order status is owned by Thyrocare tracking tables, NOT by order_items.
+    This function is intentionally a no-op for blood test items — the frontend reads
+    blood test status from ThyrocareOrderTracking.current_order_status (via _THYROCARE_STATUS_INFO).
+
+    Genetic order status is managed by admin updates via the order status endpoints and
+    is unaffected by Thyrocare webhooks.
+
+    We only update order_items.order_status for the order-level CANCELLED case so that
+    a Thyrocare cancellation is visible in the generic order view.
+    """
+    if our_order_id is None:
+        return
+    raw = (thyrocare_status_str or "").strip().upper()
+    if not raw:
+        return
+    tid = (thyrocare_order_id or "").strip()
+    if not tid:
+        return
+
+    # Only propagate CANCELLED to order_items — all other statuses live in ThyrocareOrderTracking
+    if raw != "CANCELLED":
+        return
+
+    from Orders_module.Order_model import Order as _Order, OrderStatus
+    from Login_module.Utils.datetime_utils import now_ist as _now_ist
+
+    order_row = db.query(_Order).filter(_Order.id == our_order_id).first()
+    if not order_row:
+        return
+
+    items_hit = [
+        i for i in order_row.items
+        if i.thyrocare_order_id and str(i.thyrocare_order_id).strip() == tid
+    ]
+    for it in items_hit:
+        if it.order_status != OrderStatus.CANCELLED:
+            it.order_status = OrderStatus.CANCELLED
+            it.status_updated_at = _now_ist()
+
+    # Advance order header to CANCELLED only if ALL items on this order are now cancelled
+    all_items = list(order_row.items)
+    if all_items and all(i.order_status == OrderStatus.CANCELLED for i in all_items):
+        order_row.order_status = OrderStatus.CANCELLED
+        order_row.status_updated_at = _now_ist()
+
+
+def _backfill_lab_results_member_user(
+    db: Session,
+    thyrocare_order_id: str,
+    patient_sp_id: str,
+    member_id: Optional[int],
+    user_id: Optional[int],
+) -> None:
+    """Fill NULL member_id/user_id on existing lab rows when patient tracking is linked later.
+    Searches by SP* patient_id AND by member_id (covers rows stored under XML LEADID which
+    may differ from the SP* ID we used as the key when queuing the background fetch).
+    """
+    if member_id is None and user_id is None:
+        return
+    from sqlalchemy import or_ as _or
+    rows = (
+        db.query(ThyrocareLabResult)
+        .filter(
+            ThyrocareLabResult.thyrocare_order_id == thyrocare_order_id,
+            _or(
+                ThyrocareLabResult.patient_id == patient_sp_id,
+                ThyrocareLabResult.member_id == member_id,
+            ) if member_id else ThyrocareLabResult.patient_id == patient_sp_id,
+        )
+        .all()
+    )
+    for row in rows:
+        if member_id is not None and row.member_id is None:
+            row.member_id = member_id
+        if user_id is not None and row.user_id is None:
+            row.user_id = user_id
+
+
+def _fetch_and_store_lab_results(thyrocare_order_id: str, patient_id: str) -> None:
+    """
+    Background task — calls Thyrocare GET report with type=xml, parses LEADDETAILS/TESTDETAIL,
+    stores thyrocare_lab_results; then calls type=pdf and uploads the file to S3_THYROCARE_REPORTS_BUCKET.
+    Webhook reportUrl is not used for XML fetch; patient.report_url remains from the webhook unless refreshed elsewhere.
     """
     from database import SessionLocal
     from Login_module.Utils.datetime_utils import now_ist
@@ -1291,34 +1608,34 @@ def _fetch_and_store_lab_results(thyrocare_order_id: str, patient_id: str, repor
     import xml.etree.ElementTree as ET
     from datetime import datetime as _dt
 
+    patient_id_key = (patient_id or "").strip().upper()
     db = SessionLocal()
     try:
-        # Use URL from webhook payload if available, otherwise fetch from Thyrocare
-        if report_url_from_payload:
-            report_url = report_url_from_payload
-            logger.info(f"Using report URL from webhook payload for patient {patient_id}")
-        else:
-            service = ThyrocareService()
-            report_data = service.get_report(thyrocare_order_id, patient_id, report_type="xml")
-            report_url = report_data.get("reportUrl") or report_data.get("url")
+        service = ThyrocareService()
+        report_data = service.get_report(thyrocare_order_id, patient_id_key, report_type="xml")
+        parse_url = report_data.get("reportUrl") or report_data.get("url")
 
-        if not report_url:
-            logger.warning(f"No report URL for patient {patient_id}, order {thyrocare_order_id}")
-            return
-
-        # Update report_url on patient tracking and get member_id/user_id
         patient = db.query(ThyrocarePatientTracking).filter(
             ThyrocarePatientTracking.thyrocare_order_id == thyrocare_order_id,
-            ThyrocarePatientTracking.patient_id == patient_id,
+            ThyrocarePatientTracking.patient_id == patient_id_key,
         ).first()
         resolved_member_id = patient.member_id if patient else None
         resolved_user_id = patient.user_id if patient else None
-        if patient:
-            patient.report_url = report_url
-            db.flush()
+
+        if not parse_url:
+            logger.warning(
+                f"No XML report URL from Thyrocare API for patient {patient_id}, order {thyrocare_order_id}"
+            )
+            return
+
+        if _report_url_looks_like_pdf(parse_url):
+            logger.warning(
+                f"Thyrocare XML report call returned a PDF-looking URL for patient {patient_id}, order {thyrocare_order_id}"
+            )
+            return
 
         # Fetch and parse XML
-        xml_resp = _req.get(report_url, timeout=30)
+        xml_resp = _req.get(parse_url, timeout=30)
         xml_resp.raise_for_status()
         root = ET.fromstring(xml_resp.content)
 
@@ -1330,6 +1647,12 @@ def _fetch_and_store_lab_results(thyrocare_order_id: str, patient_id: str, repor
 
         order_no = (lead.findtext("LAB_CODE") or "").strip()
         lead_id = (lead.findtext("LEADID") or patient_id).strip()
+
+        db.query(ThyrocareLabResult).filter(
+            ThyrocareLabResult.thyrocare_order_id == thyrocare_order_id,
+            ThyrocareLabResult.patient_id == lead_id,
+        ).delete(synchronize_session=False)
+        db.flush()
 
         for td in lead.findall(".//TESTDETAIL"):
             sdate_str = (td.findtext("SDATE") or "").strip()
@@ -1367,6 +1690,8 @@ def _fetch_and_store_lab_results(thyrocare_order_id: str, patient_id: str, repor
         db.rollback()
     finally:
         db.close()
+        # Always after XML attempt (including early returns): fetch PDF and store in our S3 bucket.
+        _upload_thyrocare_report_pdf_to_s3(thyrocare_order_id, patient_id_key)
 
 
 @router.post("/webhook")
@@ -1376,102 +1701,312 @@ async def thyrocare_webhook(
     db: Session = Depends(get_db),
 ):
     """
-    Thyrocare webhook endpoint — receives order status updates from Thyrocare.
-    POST /thyrocare/webhook
-    No authentication required (Thyrocare calls this endpoint directly).
-    Must respond within 1 second.
+    Thyrocare webhook — order status / patient / report updates.
+    Accepts nested orderData and/or the same fields at the root (root values are merged
+    into orderData when missing) so flat vendor payloads still update patients/phlebo.
     """
     from Login_module.Utils.datetime_utils import now_ist
 
     try:
-        payload = await request.json()
+        raw = await request.json()
     except Exception:
         return {"respId": "RES00001", "response": "Success"}
 
-    thyrocare_order_id = payload.get("orderId")
-    order_status = payload.get("orderStatus")
-    order_status_description = payload.get("orderStatusDescription")
-    thyrocare_timestamp = payload.get("timestamp")
-    b2c_patient_id = payload.get("b2cPatientId") or ""
-    order_data = payload.get("orderData") or {}
+    if not isinstance(raw, dict):
+        return {"respId": "RES00001", "response": "Success"}
+    payload = raw
 
+    od = payload.get("orderData")
+    order_data = dict(od) if isinstance(od, dict) else {}
+    # Merge root-level fields when nested orderData omits them (flat webhook shape).
+    if not order_data.get("patients") and isinstance(payload.get("patients"), list):
+        order_data["patients"] = payload["patients"]
+    if not order_data.get("phlebo") and isinstance(payload.get("phlebo"), dict):
+        order_data["phlebo"] = payload["phlebo"]
+    if not order_data.get("appointmentDate") and payload.get("appointmentDate") is not None:
+        order_data["appointmentDate"] = payload["appointmentDate"]
+    if not order_data.get("lastUpdatedTimestamp") and payload.get("lastUpdatedTimestamp"):
+        order_data["lastUpdatedTimestamp"] = payload["lastUpdatedTimestamp"]
+    if not order_data.get("orderId") and payload.get("orderId"):
+        order_data["orderId"] = str(payload.get("orderId")).strip()
+    if not order_data.get("status") and payload.get("status") is not None:
+        _rs = str(payload.get("status")).strip()
+        if _rs:
+            order_data["status"] = _rs
+    if not order_data.get("orderStatusDescription") and payload.get("orderStatusDescription"):
+        order_data["orderStatusDescription"] = str(payload.get("orderStatusDescription")).strip()
+    if not order_data.get("b2cPatientId") and payload.get("b2cPatientId") not in (None, ""):
+        order_data["b2cPatientId"] = payload.get("b2cPatientId")
+
+    thyrocare_order_id = (payload.get("orderId") or order_data.get("orderId") or "")
+    if isinstance(thyrocare_order_id, str):
+        thyrocare_order_id = thyrocare_order_id.strip()
     if not thyrocare_order_id:
         return {"respId": "RES00001", "response": "Success"}
 
-    try:
-        # Find our internal order via thyrocare_order_id on order_items
-        from Orders_module.Order_model import OrderItem, Order as OrderModel
-        order_item = db.query(OrderItem).filter(
-            OrderItem.thyrocare_order_id == thyrocare_order_id
-        ).first()
-        our_order_id = order_item.order_id if order_item else None
+    def _webhook_nonempty_str(val):
+        if val is None:
+            return None
+        s = str(val).strip()
+        return s if s else None
 
-        # Upsert thyrocare_order_tracking
+    # Prefer top-level fields (vendor canonical), then nested orderData / merged root.
+    order_status = (
+        _webhook_nonempty_str(payload.get("orderStatus"))
+        or _webhook_nonempty_str(payload.get("status"))
+        or _webhook_nonempty_str(order_data.get("status"))
+    )
+    order_status_description = (
+        _webhook_nonempty_str(payload.get("orderStatusDescription"))
+        or _webhook_nonempty_str(order_data.get("orderStatusDescription"))
+    )
+    thyrocare_timestamp = (
+        _webhook_nonempty_str(payload.get("timestamp"))
+        or _webhook_nonempty_str(order_data.get("lastUpdatedTimestamp"))
+    )
+    b2c_patient_id = (
+        payload.get("b2cPatientId")
+        or order_data.get("b2cPatientId")
+        or ""
+    )
+    if b2c_patient_id is None:
+        b2c_patient_id = ""
+
+    try:
+        from Orders_module.Order_model import OrderItem
+
+        order_items_for_order = db.query(OrderItem).filter(
+            OrderItem.thyrocare_order_id == thyrocare_order_id
+        ).all()
+        first_oi = order_items_for_order[0] if order_items_for_order else None
+        our_order_id = first_oi.order_id if first_oi else None
+        user_hint = first_oi.user_id if first_oi else None
+        member_ids_hint = []
+        _seen_mid = set()
+        for oi in order_items_for_order:
+            if oi.member_id and oi.member_id not in _seen_mid:
+                _seen_mid.add(oi.member_id)
+                member_ids_hint.append(oi.member_id)
+
+        if our_order_id is None:
+            from Orders_module.Order_model import Order as _OrderRow
+
+            def _comma_list_contains_thyrocare_id(stored: str, needle: str) -> bool:
+                if not stored or not needle:
+                    return False
+                if stored.strip() == needle.strip():
+                    return True
+                return any(part.strip() == needle.strip() for part in stored.split(","))
+
+            order_by_thc = (
+                db.query(_OrderRow)
+                .filter(_OrderRow.thyrocare_order_id == thyrocare_order_id)
+                .first()
+            )
+            if not order_by_thc:
+                _tid = thyrocare_order_id
+                _cands = (
+                    db.query(_OrderRow)
+                    .filter(
+                        _OrderRow.thyrocare_order_id.isnot(None),
+                        or_(
+                            _OrderRow.thyrocare_order_id.like(f"{_tid},%"),
+                            _OrderRow.thyrocare_order_id.like(f"{_tid}, %"),
+                            _OrderRow.thyrocare_order_id.like(f"%,{_tid},%"),
+                            _OrderRow.thyrocare_order_id.like(f"%, {_tid},%"),
+                            _OrderRow.thyrocare_order_id.like(f"%,{_tid}"),
+                            _OrderRow.thyrocare_order_id.like(f"%, {_tid}"),
+                        ),
+                    )
+                    .all()
+                )
+                order_by_thc = next(
+                    (o for o in _cands if _comma_list_contains_thyrocare_id(o.thyrocare_order_id, _tid)),
+                    None,
+                )
+            if order_by_thc:
+                our_order_id = order_by_thc.id
+                if user_hint is None:
+                    user_hint = order_by_thc.user_id
+
+        items_for_members = list(order_items_for_order)
+        if our_order_id and not any(oi.member_id for oi in items_for_members):
+            # Fallback: filter by thyrocare_order_id first to avoid pulling members from
+            # other products in the same order (multi-product scenario).
+            items_for_members = (
+                db.query(OrderItem)
+                .filter(
+                    OrderItem.order_id == our_order_id,
+                    OrderItem.thyrocare_order_id == thyrocare_order_id,
+                    OrderItem.member_id.isnot(None),
+                )
+                .all()
+            )
+            # Last resort: widen to full order only if nothing found above
+            if not items_for_members:
+                items_for_members = (
+                    db.query(OrderItem)
+                    .filter(
+                        OrderItem.order_id == our_order_id,
+                        OrderItem.member_id.isnot(None),
+                    )
+                    .all()
+                )
+            member_ids_hint = []
+            _seen_mid = set()
+            for oi in items_for_members:
+                if oi.member_id and oi.member_id not in _seen_mid:
+                    _seen_mid.add(oi.member_id)
+                    member_ids_hint.append(oi.member_id)
+
         tracking = db.query(ThyrocareOrderTracking).filter(
             ThyrocareOrderTracking.thyrocare_order_id == thyrocare_order_id
         ).first()
 
         phlebo = order_data.get("phlebo") or {}
+        if not isinstance(phlebo, dict):
+            phlebo = {}
+        phlebo_contact = (
+            phlebo.get("contactNumber")
+            or phlebo.get("mobile")
+            or phlebo.get("phone")
+        )
         appt_date_str = order_data.get("appointmentDate")
         appt_date = None
         if appt_date_str:
             try:
                 from datetime import datetime
-                appt_date = datetime.fromisoformat(appt_date_str.replace("Z", "+00:00"))
+                appt_date = datetime.fromisoformat(str(appt_date_str).replace("Z", "+00:00"))
             except Exception:
                 pass
 
         if not tracking:
-            tracking = ThyrocareOrderTracking(
-                thyrocare_order_id=thyrocare_order_id,
-                our_order_id=our_order_id,
-                current_order_status=order_status,
-                current_status_description=order_status_description,
-                phlebo_name=phlebo.get("name"),
-                phlebo_contact=phlebo.get("contactNumber"),
-                appointment_date=appt_date,
-                last_webhook_at=now_ist(),
-                created_at=now_ist(),
-            )
-            db.add(tracking)
-            db.flush()
-        else:
-            tracking.current_order_status = order_status
-            tracking.current_status_description = order_status_description
-            tracking.phlebo_name = phlebo.get("name") or tracking.phlebo_name
-            tracking.phlebo_contact = phlebo.get("contactNumber") or tracking.phlebo_contact
-            tracking.appointment_date = appt_date or tracking.appointment_date
-            tracking.last_webhook_at = now_ist()
-            if our_order_id and not tracking.our_order_id:
-                tracking.our_order_id = our_order_id
-            db.flush()
+            try:
+                with db.begin_nested():
+                    tracking = ThyrocareOrderTracking(
+                        thyrocare_order_id=thyrocare_order_id,
+                        our_order_id=our_order_id,
+                        user_id=user_hint,
+                        member_ids=member_ids_hint or None,
+                        current_order_status=order_status,
+                        current_status_description=order_status_description,
+                        phlebo_name=phlebo.get("name"),
+                        phlebo_contact=phlebo_contact,
+                        appointment_date=appt_date,
+                        last_webhook_at=now_ist(),
+                        created_at=now_ist(),
+                    )
+                    db.add(tracking)
+                    db.flush()
+            except IntegrityError:
+                tracking = db.query(ThyrocareOrderTracking).filter(
+                    ThyrocareOrderTracking.thyrocare_order_id == thyrocare_order_id
+                ).first()
+                if tracking is None:
+                    raise
 
-        # Append to status history (always insert)
-        history = ThyrocareOrderStatusHistory(
-            thyrocare_order_id=thyrocare_order_id,
-            order_tracking_id=tracking.id,
-            order_status=order_status,
-            order_status_description=order_status_description,
-            thyrocare_timestamp=thyrocare_timestamp,
-            b2c_patient_id=b2c_patient_id,
-            raw_payload=payload,
-            received_at=now_ist(),
+        # Merge latest webhook into tracking (covers existing rows and races on first insert).
+        if order_status:
+            tracking.current_order_status = order_status
+        if order_status_description:
+            tracking.current_status_description = order_status_description
+        tracking.phlebo_name = phlebo.get("name") or tracking.phlebo_name
+        tracking.phlebo_contact = phlebo_contact or tracking.phlebo_contact
+        tracking.appointment_date = appt_date or tracking.appointment_date
+        tracking.last_webhook_at = now_ist()
+        if our_order_id and not tracking.our_order_id:
+            tracking.our_order_id = our_order_id
+        if user_hint and not tracking.user_id:
+            tracking.user_id = user_hint
+        if member_ids_hint:
+            prev_m = list(tracking.member_ids) if isinstance(tracking.member_ids, list) else []
+            merged_m = sorted(set(prev_m) | set(member_ids_hint))
+            if merged_m != sorted(set(prev_m)):
+                tracking.member_ids = merged_m
+        db.flush()
+
+        # Reconcile items_for_members from tracking.order_item_ids (authoritative, product-group-specific).
+        # This is the most reliable source — written at booking time with the exact order items
+        # that were sent to Thyrocare for this product group. Prevents cross-product member
+        # contamination in multi-product orders.
+        if tracking and tracking.order_item_ids:
+            _tracked_ids = set(int(x) for x in tracking.order_item_ids)
+            # Try to resolve from already-loaded items first (no extra query if they match)
+            _from_tracked = [oi for oi in items_for_members if oi.id in _tracked_ids]
+            if _from_tracked:
+                items_for_members = _from_tracked
+            else:
+                # Need to load them (could be empty if OrderItem query above returned nothing)
+                items_for_members = (
+                    db.query(OrderItem).filter(OrderItem.id.in_(list(_tracked_ids))).all()
+                )
+            # Rebuild member_ids_hint from authoritative items
+            member_ids_hint = []
+            _seen_mid = set()
+            for oi in items_for_members:
+                if oi.member_id and oi.member_id not in _seen_mid:
+                    _seen_mid.add(oi.member_id)
+                    member_ids_hint.append(oi.member_id)
+
+        tc_status_for_order = order_status or tracking.current_order_status or ""
+        _sync_nucleotide_order_from_thyrocare_webhook(
+            db, our_order_id, thyrocare_order_id, tc_status_for_order
         )
-        db.add(history)
+
+        patient_row_status = order_status or tracking.current_order_status
+
+        # Status history: one row per distinct (order_status + description) on this tracking
+        # row. Omit timestamp/b2c from dedupe so vendor retries with jittered fields do not
+        # spam history. Refresh raw_payload / timestamp / b2c when the same event repeats.
+
+        def _hist_fingerprint_str(v):
+            if v is None:
+                return ""
+            return str(v).strip()
+
+        _fp_os = _hist_fingerprint_str(order_status)
+        _fp_osd = _hist_fingerprint_str(order_status_description)
+
+        _hist_row = (
+            db.query(ThyrocareOrderStatusHistory)
+            .filter(
+                ThyrocareOrderStatusHistory.order_tracking_id == tracking.id,
+                func.coalesce(ThyrocareOrderStatusHistory.order_status, "") == _fp_os,
+                func.coalesce(ThyrocareOrderStatusHistory.order_status_description, "")
+                == _fp_osd,
+            )
+            .order_by(ThyrocareOrderStatusHistory.id.desc())
+            .first()
+        )
+        if _hist_row is None:
+            history = ThyrocareOrderStatusHistory(
+                thyrocare_order_id=thyrocare_order_id,
+                order_tracking_id=tracking.id,
+                order_status=order_status,
+                order_status_description=order_status_description,
+                thyrocare_timestamp=thyrocare_timestamp,
+                b2c_patient_id=b2c_patient_id,
+                raw_payload=payload,
+                received_at=now_ist(),
+            )
+            db.add(history)
+        else:
+            _hist_row.raw_payload = payload
+            if thyrocare_timestamp:
+                _hist_row.thyrocare_timestamp = thyrocare_timestamp
+            if b2c_patient_id:
+                _hist_row.b2c_patient_id = b2c_patient_id
+            _hist_row.received_at = now_ist()
 
         # Upsert patients (only SP* patient IDs)
         patients = order_data.get("patients") or []
+        if not isinstance(patients, list):
+            patients = []
 
-        # Build member lookup from order_items for this thyrocare_order
-        from Orders_module.Order_model import OrderItem as _OI
         from Member_module.Member_model import Member as _Member
 
-        order_items_for_order = db.query(_OI).filter(
-            _OI.thyrocare_order_id == thyrocare_order_id
-        ).all()
-
         # Build list of (member_id, user_id, member_name) for matching — deduplicated by member_id
-        member_ids_in_order = [oi.member_id for oi in order_items_for_order if oi.member_id]
+        member_ids_in_order = [oi.member_id for oi in items_for_members if oi.member_id]
         members_by_id = {}
         if member_ids_in_order:
             members = db.query(_Member).filter(_Member.id.in_(member_ids_in_order)).all()
@@ -1479,7 +2014,7 @@ async def thyrocare_webhook(
 
         seen_member_ids = set()
         member_lookup = []
-        for oi in order_items_for_order:
+        for oi in items_for_members:
             if oi.member_id and oi.member_id not in seen_member_ids:
                 seen_member_ids.add(oi.member_id)
                 m = members_by_id.get(oi.member_id)
@@ -1489,20 +2024,60 @@ async def thyrocare_webhook(
                     "name": m.name.strip().upper() if m and m.name else "",
                 })
 
-        def _resolve_member(patient_name: str, index: int):
+        def _external_member_id_from_patient(patient_dict: dict):
+            """Thyrocare may send externalPatientId on patient.attributes or on each items[].attributes."""
+            attrs = patient_dict.get("attributes")
+            if isinstance(attrs, dict):
+                v = attrs.get("externalPatientId")
+                if v is not None and str(v).strip() != "":
+                    return v
+            for it in patient_dict.get("items") or []:
+                if not isinstance(it, dict):
+                    continue
+                a = it.get("attributes")
+                if isinstance(a, dict) and a.get("externalPatientId") is not None:
+                    if str(a.get("externalPatientId")).strip() != "":
+                        return a.get("externalPatientId")
+            v = patient_dict.get("externalPatientId")
+            return v if v is not None and str(v).strip() != "" else None
+
+        def _external_id_resolution(patient_dict: dict):
             """
-            Resolve member_id and user_id for a webhook patient.
-            Strategy:
-            1. Name match (case-insensitive) — exact
-            2. If ambiguous (multiple same name) → fall back to index
-            3. If no name match → fall back to index
+            Returns (kind, member_id, user_id).
+            kind: 'absent' | 'ok' | 'invalid' | 'unmatched'
+            If kind is invalid/unmatched, caller must not fall back to name/index (avoid wrong member).
+            """
+            raw = _external_member_id_from_patient(patient_dict)
+            if raw is None:
+                return "absent", None, None
+            try:
+                mid = int(raw)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "Thyrocare webhook: non-numeric externalPatientId %r for order %s",
+                    raw,
+                    thyrocare_order_id,
+                )
+                return "invalid", None, None
+            for m in member_lookup:
+                if m["member_id"] == mid:
+                    return "ok", m["member_id"], m["user_id"]
+            logger.warning(
+                "Thyrocare webhook: externalPatientId %s not in order members for order %s",
+                mid,
+                thyrocare_order_id,
+            )
+            return "unmatched", None, None
+
+        def _resolve_member(patient_name: str):
+            """
+            Name match only when unambiguous. Index fallback only for single-member orders
+            (avoids assigning patient A's report to member B).
             """
             if not member_lookup:
                 return None, None
 
             normalized = (patient_name or "").strip().upper()
-
-            # Try name match
             name_matches = [m for m in member_lookup if m["name"] == normalized]
 
             if len(name_matches) == 1:
@@ -1510,27 +2085,34 @@ async def thyrocare_webhook(
 
             if len(name_matches) > 1:
                 logger.warning(
-                    f"Ambiguous name match for '{patient_name}' in order {thyrocare_order_id} "
-                    f"— falling back to index {index}"
+                    "Thyrocare webhook: ambiguous name %r for order %s (%d matches) — not assigning member",
+                    patient_name,
+                    thyrocare_order_id,
+                    len(name_matches),
                 )
+                return None, None
 
-            # Fall back to index
-            if index < len(member_lookup):
-                return member_lookup[index]["member_id"], member_lookup[index]["user_id"]
+            if len(member_lookup) == 1:
+                return member_lookup[0]["member_id"], member_lookup[0]["user_id"]
 
+            logger.warning(
+                "Thyrocare webhook: no unique name match for %r on order %s (%d members) — not using index fallback",
+                patient_name,
+                thyrocare_order_id,
+                len(member_lookup),
+            )
             return None, None
 
-        sp_index = 0
         for p in patients:
-            pid = p.get("id") or ""
-            if not pid.upper().startswith("SP"):
+            pid_raw = (p.get("id") or "").strip()
+            if not pid_raw.upper().startswith("SP"):
                 continue
-
-            pid_index = sp_index
-            sp_index += 1
+            pid = pid_raw.upper()
 
             patient_name_raw = p.get("name") or ""
-            resolved_member_id, resolved_user_id = _resolve_member(patient_name_raw, pid_index)
+            ext_kind, resolved_member_id, resolved_user_id = _external_id_resolution(p)
+            if ext_kind == "absent":
+                resolved_member_id, resolved_user_id = _resolve_member(patient_name_raw)
 
             report_ts = None
             if p.get("reportTimestamp"):
@@ -1545,45 +2127,82 @@ async def thyrocare_webhook(
                 ThyrocarePatientTracking.patient_id == pid,
             ).first()
 
-            if not existing_patient:
-                new_patient = ThyrocarePatientTracking(
-                    thyrocare_order_id=thyrocare_order_id,
-                    order_tracking_id=tracking.id,
-                    patient_id=pid,
-                    patient_name=p.get("name"),
-                    age=p.get("age"),
-                    gender=p.get("gender"),
-                    is_report_available=p.get("isReportAvailable", False),
-                    report_url=p.get("reportUrl"),
-                    report_timestamp=report_ts,
-                    current_status=order_status,  # human label e.g. "Serviced"
-                    member_id=resolved_member_id,
-                    user_id=resolved_user_id,
-                    created_at=now_ist(),
-                )
-                db.add(new_patient)
-                db.flush()
-                existing_patient = new_patient
+            if "isReportAvailable" in p:
+                report_available = bool(p.get("isReportAvailable"))
+            elif existing_patient:
+                report_available = existing_patient.is_report_available
             else:
-                existing_patient.patient_name = p.get("name") or existing_patient.patient_name
-                existing_patient.is_report_available = p.get("isReportAvailable", existing_patient.is_report_available)
-                existing_patient.report_url = p.get("reportUrl") or existing_patient.report_url
-                existing_patient.report_timestamp = report_ts or existing_patient.report_timestamp
-                existing_patient.current_status = order_status  # human label
-                if not existing_patient.member_id:
-                    existing_patient.member_id = resolved_member_id
-                if not existing_patient.user_id:
-                    existing_patient.user_id = resolved_user_id
+                report_available = False
 
-            # Auto-fetch report in background (keeps webhook response under 1 second)
-            if p.get("isReportAvailable") and pid.upper().startswith("SP"):
-                report_url_from_payload = p.get("reportUrl")
-                background_tasks.add_task(
-                    _fetch_and_store_lab_results,
-                    thyrocare_order_id=thyrocare_order_id,
-                    patient_id=pid,
-                    report_url_from_payload=report_url_from_payload,
-                )
+            if not existing_patient:
+                try:
+                    with db.begin_nested():
+                        new_patient = ThyrocarePatientTracking(
+                            thyrocare_order_id=thyrocare_order_id,
+                            order_tracking_id=tracking.id,
+                            patient_id=pid,
+                            patient_name=p.get("name"),
+                            age=p.get("age"),
+                            gender=p.get("gender"),
+                            is_report_available=report_available,
+                            report_url=p.get("reportUrl"),
+                            report_timestamp=report_ts,
+                            current_status=patient_row_status,
+                            member_id=resolved_member_id,
+                            user_id=resolved_user_id,
+                            created_at=now_ist(),
+                        )
+                        db.add(new_patient)
+                        db.flush()
+                        existing_patient = new_patient
+                except IntegrityError:
+                    existing_patient = db.query(ThyrocarePatientTracking).filter(
+                        ThyrocarePatientTracking.thyrocare_order_id == thyrocare_order_id,
+                        ThyrocarePatientTracking.patient_id == pid,
+                    ).first()
+                    if existing_patient is None:
+                        raise
+
+            if existing_patient.order_tracking_id != tracking.id:
+                existing_patient.order_tracking_id = tracking.id
+            existing_patient.patient_name = p.get("name") or existing_patient.patient_name
+            existing_patient.is_report_available = report_available
+            existing_patient.report_url = p.get("reportUrl") or existing_patient.report_url
+            existing_patient.report_timestamp = report_ts or existing_patient.report_timestamp
+            existing_patient.current_status = patient_row_status
+            if not existing_patient.member_id:
+                existing_patient.member_id = resolved_member_id
+            if not existing_patient.user_id:
+                existing_patient.user_id = resolved_user_id
+
+            _backfill_lab_results_member_user(
+                db,
+                thyrocare_order_id,
+                pid,
+                existing_patient.member_id,
+                existing_patient.user_id,
+            )
+
+            # Auto-fetch report in background (keeps webhook response under 1 second).
+            # Only queue when results don't already exist — avoids redundant API calls
+            # and the DELETE-then-INSERT race when two webhooks fire close together.
+            # Note: XML LEADID may differ from the SP* patient ID, so query by order_id
+            # only to catch rows stored under either key.
+            if report_available and pid.upper().startswith("SP"):
+                already_fetched = db.query(ThyrocareLabResult).filter(
+                    ThyrocareLabResult.thyrocare_order_id == thyrocare_order_id,
+                    or_(
+                        ThyrocareLabResult.patient_id == pid,
+                        ThyrocareLabResult.member_id == existing_patient.member_id,
+                    ) if existing_patient.member_id else
+                    ThyrocareLabResult.patient_id == pid,
+                ).first()
+                if not already_fetched:
+                    background_tasks.add_task(
+                        _fetch_and_store_lab_results,
+                        thyrocare_order_id=thyrocare_order_id,
+                        patient_id=pid,
+                    )
 
         db.commit()
         logger.info(f"Thyrocare webhook processed: order={thyrocare_order_id} status={order_status_description}")
@@ -1613,6 +2232,17 @@ def get_my_thyrocare_orders(
     if not orders:
         return {"status": "success", "total": 0, "data": []}
 
+    prod_internal_ids = {o.thyrocare_product_id for o in orders if o.thyrocare_product_id}
+    prod_meta: dict = {}
+    if prod_internal_ids:
+        from Thyrocare_module.Thyrocare_model import ThyrocareProduct as _TP
+
+        for p in db.query(_TP).filter(_TP.id.in_(prod_internal_ids)).all():
+            prod_meta[p.id] = {
+                "thyrocare_catalog_product_id": p.thyrocare_id,
+                "thyrocare_product_name": p.name,
+            }
+
     order_ids = [o.id for o in orders]
     all_history = db.query(ThyrocareOrderStatusHistory).filter(
         ThyrocareOrderStatusHistory.order_tracking_id.in_(order_ids)
@@ -1625,9 +2255,15 @@ def get_my_thyrocare_orders(
 
     result = []
     for o in orders:
+        pm = prod_meta.get(o.thyrocare_product_id, {}) if o.thyrocare_product_id else {}
         result.append({
             "thyrocare_order_id": o.thyrocare_order_id,
             "our_order_id": o.our_order_id,
+            "ref_order_no": o.ref_order_no,
+            "order_item_ids": o.order_item_ids or [],
+            "thyrocare_product_id": o.thyrocare_product_id,
+            "thyrocare_catalog_product_id": pm.get("thyrocare_catalog_product_id"),
+            "thyrocare_product_name": pm.get("thyrocare_product_name"),
             "current_order_status": o.current_order_status,
             "current_status_description": o.current_status_description,
             "appointment_date": o.appointment_date.isoformat() if o.appointment_date else None,
@@ -1707,19 +2343,47 @@ def get_my_lab_reports(
     }
 
 
-# Thyrocare status → internal custom_status mapping
-# Keys are orderStatus (human labels from webhook)
-_THYROCARE_STATUS_MAP = {
-    "YET TO ASSIGN": "Order Booked",
-    "ASSIGNED": None,
-    "STARTED": None,
-    "ARRIVED": None,
-    "SERVICED": "Sample Collected",
-    "SAMPLE IMPORTED": "Processing",
-    "RESCHEDULED": None,
-    "CANCELLED": "Cancelled",
-    "DONE": "Report Ready",
+# Thyrocare orderStatus (uppercase key) → (internal_status_code, custom_status display)
+#
+# 5-stage journey shown to users:
+#   Stage 1 — Order Placed       (YET TO ASSIGN / ASSIGNED / ACCEPTED / STARTED / ARRIVED / CONFIRMED / RESCHEDULED)
+#   Stage 2 — Sample Collected   (SERVICED)
+#   Stage 3 — Lab Received       (SAMPLE IMPORTED)
+#   Stage 4 — Processing         (DONE / REPORTED — report parsing happens in background)
+#   Stage 5 — Report Ready       (set by frontend/API when ThyrocareLabResult rows exist for the patient)
+#
+# custom_status = None means "keep showing the previous stage label" (no visible change for the user).
+_THYROCARE_STATUS_INFO = {
+    # Stage 1 — Order Placed
+    "YET TO ASSIGN": ("ORDER_PLACED",    "Order Placed"),
+    "ASSIGNED":      ("ORDER_PLACED",    "Order Placed"),
+    "ACCEPTED":      ("ORDER_PLACED",    "Order Placed"),
+    "RESCHEDULED":   ("ORDER_PLACED",    "Order Placed"),
+    "STARTED":       ("ORDER_PLACED",    "Order Placed"),
+    "ARRIVED":       ("ORDER_PLACED",    "Order Placed"),
+    "CONFIRMED":     ("ORDER_PLACED",    "Order Placed"),
+
+    # Stage 2 — Sample Collected
+    "SERVICED":         ("SAMPLE_COLLECTED", "Sample Collected"),
+
+    # Stage 3 — Lab Received
+    "SAMPLE IMPORTED":  ("LAB_RECEIVED",    "Lab Received"),
+
+    # Stage 5 — Report Ready (Thyrocare marks DONE/REPORTED when results are available)
+    "DONE":     ("REPORT_READY", "Report Ready"),
+    "REPORTED": ("REPORT_READY", "Report Ready"),
+
+    # Terminal
+    "CANCELLED": ("ORDER_CANCELLED", "Cancelled"),
 }
+
+
+def _thyrocare_status_parts(raw: str):
+    key = (raw or "").upper().strip()
+    row = _THYROCARE_STATUS_INFO.get(key)
+    if not row:
+        return None, None
+    return row[0], row[1]
 
 
 @router.get("/orders/{thyrocare_order_id}/order-details")
@@ -1772,16 +2436,32 @@ def get_thyrocare_order_details_combined(
         ThyrocarePatientTracking.order_tracking_id == tracking.id
     ).all()
 
-    # Map current status using human label (current_order_status)
     raw_status = tracking.current_order_status or ""
-    mapped_status = _THYROCARE_STATUS_MAP.get(raw_status.upper())
+    internal_code, custom_status = _thyrocare_status_parts(raw_status)
+
+    pm_detail: dict = {}
+    if tracking.thyrocare_product_id:
+        from Thyrocare_module.Thyrocare_model import ThyrocareProduct as _TP
+
+        _p = db.query(_TP).filter(_TP.id == tracking.thyrocare_product_id).first()
+        if _p:
+            pm_detail = {
+                "thyrocare_catalog_product_id": _p.thyrocare_id,
+                "thyrocare_product_name": _p.name,
+            }
 
     return {
         "status": "success",
         "data": {
             "order_number": our_order.order_number if our_order else None,
             "thyrocare_order_id": thyrocare_order_id,
-            "current_status": mapped_status,
+            "ref_order_no": tracking.ref_order_no,
+            "order_item_ids": tracking.order_item_ids or [],
+            "thyrocare_product_id": tracking.thyrocare_product_id,
+            "thyrocare_catalog_product_id": pm_detail.get("thyrocare_catalog_product_id"),
+            "thyrocare_product_name": pm_detail.get("thyrocare_product_name"),
+            "current_internal_status_code": internal_code,
+            "current_status": custom_status,
             "current_status_raw": raw_status,
             "appointment_date": tracking.appointment_date.isoformat() if tracking.appointment_date else None,
             "phlebo": {
@@ -1798,10 +2478,11 @@ def get_thyrocare_order_details_combined(
                     "member_id": p.member_id,
                     "is_report_available": p.is_report_available,
                     "report_url": p.report_url,
+                    "has_stored_report_pdf": bool(p.report_pdf_s3_key or p.report_pdf_s3_url),
+                    "report_pdf_s3_url": p.report_pdf_s3_url,
                     "report_timestamp": p.report_timestamp.isoformat() if p.report_timestamp else None,
-                    "current_status": _THYROCARE_STATUS_MAP.get(
-                        (p.current_status or "").upper()
-                    ),
+                    "internal_status_code": _thyrocare_status_parts(p.current_status or "")[0],
+                    "current_status": _thyrocare_status_parts(p.current_status or "")[1],
                 }
                 for p in patients
             ],
@@ -1809,9 +2490,8 @@ def get_thyrocare_order_details_combined(
                 {
                     "thyrocare_status": h.order_status,
                     "status_description": h.order_status_description,
-                    "mapped_status": _THYROCARE_STATUS_MAP.get(
-                        (h.order_status or "").upper()
-                    ),
+                    "internal_status_code": _thyrocare_status_parts(h.order_status or "")[0],
+                    "mapped_status": _thyrocare_status_parts(h.order_status or "")[1],
                     "timestamp": h.thyrocare_timestamp,
                     "received_at": h.received_at.isoformat() if h.received_at else None,
                 }
@@ -1836,9 +2516,10 @@ def download_patient_report(
     from urllib.parse import urlparse, parse_qs
     from datetime import datetime, timezone
 
+    patient_id_key = (patient_id or "").strip().upper()
     # Find patient record belonging to this user
     patient = db.query(ThyrocarePatientTracking).filter(
-        ThyrocarePatientTracking.patient_id == patient_id,
+        ThyrocarePatientTracking.patient_id == patient_id_key,
         ThyrocarePatientTracking.user_id == current_user.id,
     ).first()
 
@@ -1848,21 +2529,44 @@ def download_patient_report(
     if not patient.is_report_available:
         raise HTTPException(status_code=404, detail="Report is not yet available for this patient.")
 
+    from Thyrocare_module.thyrocare_report_s3_service import (
+        ThyrocareReportS3Service,
+        get_thyrocare_report_s3_service,
+    )
+
+    s3_reports = get_thyrocare_report_s3_service()
+    s3_key = patient.report_pdf_s3_key
+    if not s3_key and patient.report_pdf_s3_url:
+        s3_key = ThyrocareReportS3Service.try_parse_s3_key_from_url(patient.report_pdf_s3_url)
+        if s3_key:
+            patient.report_pdf_s3_key = s3_key
+            patient.report_pdf_s3_url = None
+            db.commit()
+
+    if s3_key and s3_reports.is_configured():
+        try:
+            presigned = s3_reports.presigned_get_url(s3_key)
+            return RedirectResponse(url=presigned, status_code=302)
+        except Exception as e:
+            logger.error("Presigned report URL failed for patient %s: %s", patient_id_key, e, exc_info=True)
+            raise HTTPException(status_code=502, detail="Could not generate download link for stored report.")
+
     def _is_url_expired(url: str) -> bool:
-        """Check if S3 pre-signed URL is expired using X-Amz-Date and X-Amz-Expires."""
+        """True only when this is an AWS SigV4 presigned URL and its expiry has passed."""
         try:
             parsed = urlparse(url)
             params = parse_qs(parsed.query)
             amz_date = params.get("X-Amz-Date", [None])[0]
             amz_expires = params.get("X-Amz-Expires", [None])[0]
             if not amz_date or not amz_expires:
-                return True  # Can't determine — treat as expired
+                # Webhook / Thyrocare URLs without AWS query params — not a presigned TTL we can check.
+                return False
             signed_at = datetime.strptime(amz_date, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
             expires_in = int(amz_expires)
             expiry_time = signed_at.timestamp() + expires_in
             return datetime.now(timezone.utc).timestamp() > expiry_time
         except Exception:
-            return True  # On any parse error, treat as expired
+            return True  # Malformed presigned URL — safer to refresh
 
     report_url = patient.report_url
 
@@ -1871,7 +2575,7 @@ def download_patient_report(
         try:
             service = ThyrocareService()
             report_data = service.get_report(
-                patient.thyrocare_order_id, patient_id, report_type="pdf"
+                patient.thyrocare_order_id, patient_id_key, report_type="pdf"
             )
             fresh_url = report_data.get("reportUrl") or report_data.get("url")
             if fresh_url:
@@ -1880,6 +2584,16 @@ def download_patient_report(
                 report_url = fresh_url
             else:
                 raise HTTPException(status_code=404, detail="Could not fetch report URL from Thyrocare.")
+        except _requests.HTTPError as e:
+            status = e.response.status_code if e.response is not None else None
+            if status == 404:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Report not found at Thyrocare for this order/patient (common in sandbox or before publish).",
+                )
+            raise HTTPException(status_code=502, detail=f"Could not fetch report: {str(e)}")
+        except HTTPException:
+            raise
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"Could not fetch report: {str(e)}")
 

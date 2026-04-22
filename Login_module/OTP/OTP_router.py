@@ -22,6 +22,7 @@ from ..User.user_model import User
 from ..Device.Device_session_crud import create_device_session, deactivate_session_by_token
 from . import OTP_crud
 from Notification_module.Notification_crud import upsert_device_token
+from Utm_tracking_module.Utm_tracking_crud import link_utm_rows_for_new_user
 
 from config import settings
 
@@ -441,6 +442,22 @@ def verify_otp(req: VerifyOTPRequest, request: Request, db: Session = Depends(ge
         
         # Link token_family_id to device_session
         session.refresh_token_family_id = token_family_id
+
+        if is_new_user and req.utm_fingerprint:
+            try:
+                link_utm_rows_for_new_user(
+                    db,
+                    fingerprint=req.utm_fingerprint,
+                    user_id=user.id,
+                    phone=user.mobile,
+                )
+            except Exception as utm_err:
+                logger.warning(
+                    "UTM link after new user signup failed (user_id=%s): %s",
+                    user.id,
+                    utm_err,
+                )
+
         db.commit()
         db.refresh(session)
 

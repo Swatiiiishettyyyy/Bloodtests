@@ -2,7 +2,7 @@
 Thyrocare webhook tracking models.
 Stores order status updates received from Thyrocare webhooks.
 """
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, JSON, ForeignKey
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, JSON, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import relationship
 from database import Base
 from Login_module.Utils.datetime_utils import now_ist
@@ -38,7 +38,10 @@ class ThyrocareOrderTracking(Base):
 
     # Internal mapping — set at booking time
     user_id = Column(Integer, nullable=True, index=True)
-    member_ids = Column(JSON, nullable=True)  # list of member IDs booked under this order
+    member_ids = Column(JSON, nullable=True)        # list of member IDs booked under this order
+    order_item_ids = Column(JSON, nullable=True)    # list of order_item IDs for this Thyrocare booking
+    thyrocare_product_id = Column(Integer, nullable=True, index=True)  # our internal ThyrocareProduct.id
+    ref_order_no = Column(String(100), nullable=True, index=True)  # e.g. "ORD-2024-00123_1"
 
     # Relationships
     our_order = relationship("Order", foreign_keys=[our_order_id])
@@ -52,6 +55,13 @@ class ThyrocarePatientTracking(Base):
     Updated on each webhook that includes patient data.
     """
     __tablename__ = "thyrocare_patient_tracking"
+    __table_args__ = (
+        UniqueConstraint(
+            "thyrocare_order_id",
+            "patient_id",
+            name="uq_thyrocare_patient_order_patient",
+        ),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     thyrocare_order_id = Column(String(50), nullable=False, index=True)
@@ -64,6 +74,8 @@ class ThyrocarePatientTracking(Base):
 
     is_report_available = Column(Boolean, nullable=True, default=False)
     report_url = Column(Text, nullable=True)
+    report_pdf_s3_url = Column(Text, nullable=True)
+    report_pdf_s3_key = Column(Text, nullable=True)
     report_timestamp = Column(DateTime(timezone=True), nullable=True)
 
     current_status = Column(String(100), nullable=True)
@@ -80,8 +92,8 @@ class ThyrocarePatientTracking(Base):
 
 class ThyrocareOrderStatusHistory(Base):
     """
-    Append-only log — one row per webhook received.
-    Never updated, only inserted.
+    One row per distinct (order_status + order_status_description) on an order tracking row.
+    Repeat webhooks refresh raw_payload, thyrocare_timestamp, b2c_patient_id, and received_at.
     """
     __tablename__ = "thyrocare_order_status_history"
 

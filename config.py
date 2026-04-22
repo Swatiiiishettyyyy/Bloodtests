@@ -83,6 +83,9 @@ class Settings(BaseSettings):
     THYROCARE_ENTITY_TYPE: str = "DSA"
     THYROCARE_PAY_TYPE: str = "POSTPAID"
 
+    # Admin password for PUT /orders/status endpoint — override via ORDER_STATUS_PASSWORD env var
+    ORDER_STATUS_PASSWORD: str = "change_me_in_env"
+
     model_config = ConfigDict(
         env_file=os.path.join(os.path.dirname(__file__), ".env"),
         env_file_encoding="utf-8",

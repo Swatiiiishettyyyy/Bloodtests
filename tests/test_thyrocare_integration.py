@@ -18,15 +18,12 @@ def test_thyrocare_status_mapping():
     )
     from Orders_module.Order_model import OrderStatus
 
-    assert _map_thyrocare_status("YET TO ASSIGN") == OrderStatus.CONFIRMED
-    assert _map_thyrocare_status("ASSIGNED") == OrderStatus.PHLEBO_ASSIGNED
-    assert _map_thyrocare_status("ACCEPTED") == OrderStatus.PHLEBO_ASSIGNED
-    assert _map_thyrocare_status("STARTED") == OrderStatus.PHLEBO_EN_ROUTE
-    assert _map_thyrocare_status("ARRIVED") == OrderStatus.PHLEBO_ARRIVED
-    assert _map_thyrocare_status("CONFIRMED") == OrderStatus.SAMPLE_COLLECTED
-    assert _map_thyrocare_status("DONE") == OrderStatus.REPORT_READY
-    assert _map_thyrocare_status("REPORTED") == OrderStatus.REPORT_READY
+    # This mapper is intentionally minimal: blood test status display is driven by
+    # Thyrocare tracking tables; we only propagate CANCELLED to internal status.
     assert _map_thyrocare_status("CANCELLED") == OrderStatus.CANCELLED
+    assert _map_thyrocare_status("YET TO ASSIGN") == OrderStatus.CONFIRMED
+    assert _map_thyrocare_status("ASSIGNED") == OrderStatus.CONFIRMED
+    assert _map_thyrocare_status("DONE") == OrderStatus.CONFIRMED
     # Unknown status should fall back to CONFIRMED (not PENDING)
     assert _map_thyrocare_status("UNKNOWN_STATUS") == OrderStatus.CONFIRMED
 

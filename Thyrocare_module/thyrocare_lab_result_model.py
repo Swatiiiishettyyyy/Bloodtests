@@ -2,7 +2,7 @@
 Thyrocare lab result model.
 Stores parsed test results extracted from the XML report URL.
 """
-from sqlalchemy import Column, Integer, String, Text, DateTime
+from sqlalchemy import Column, Integer, String, Text, DateTime, UniqueConstraint
 from database import Base
 from Login_module.Utils.datetime_utils import now_ist
 
@@ -37,3 +37,10 @@ class ThyrocareLabResult(Base):
     user_id = Column(Integer, nullable=True, index=True)
 
     created_at = Column(DateTime(timezone=True), default=now_ist, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "thyrocare_order_id", "patient_id", "test_code",
+            name="uq_thyrocare_lab_results_order_patient_test",
+        ),
+    )

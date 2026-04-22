@@ -21,13 +21,20 @@ class ThyrocareProductOut(BaseModel):
     listing_price: float
     selling_price: float
     discount_percentage: float
+    notational_incentive: float
     beneficiaries_min: int
     beneficiaries_max: int
+    beneficiaries_multiple: int
     is_fasting_required: Optional[bool] = None
     is_home_collectible: Optional[bool] = None
     category: Optional[str] = None
+    thyrocare_price: Optional[float] = None
+    thyrocare_listing_price: Optional[int] = None
     about: Optional[str] = None
     short_description: Optional[str] = None
+    what_this_test_checks: Optional[str] = None
+    who_should_take_this_test: Optional[str] = None
+    why_doctors_recommend: Optional[str] = None
     parameters: List[ThyrocareTestParameterOut] = []
 
     class Config:
@@ -37,10 +44,14 @@ class ThyrocareProductOut(BaseModel):
 class ThyrocareProductUpdate(BaseModel):
     about: Optional[str] = None
     short_description: Optional[str] = None
+    what_this_test_checks: Optional[str] = None
+    who_should_take_this_test: Optional[str] = None
+    why_doctors_recommend: Optional[str] = None
     category: Optional[str] = None
     is_active: Optional[bool] = None
     selling_price: Optional[float] = None
     listing_price: Optional[float] = None
+    thyrocare_price: Optional[float] = None
 
 
 # Cart schemas for blood tests
@@ -99,7 +110,10 @@ class ActiveCartResponse(BaseModel):
 
 class BloodTestOrderCreate(BaseModel):
     group_id: str = Field(..., description="Cart group_id from blood test cart add")
-    order_id: Optional[int] = Field(None, description="Internal order ID (from orders table after payment). If not provided, a ref_order_no is auto-generated.")
+    order_id: Optional[int] = Field(
+        None,
+        description="Internal order ID (from orders table after payment). Thyrocare refOrderNo is always a shared numeric sequence starting at 2627001001.",
+    )
     pay_type: str = Field("POSTPAID", description="POSTPAID or PREPAID")
     is_report_hard_copy_required: bool = Field(False)
     remarks: Optional[str] = Field(None, description="Additional remarks for the order")

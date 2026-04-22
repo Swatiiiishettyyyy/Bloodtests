@@ -26,6 +26,7 @@ from datetime import timedelta
 from Notification_module.Notification_crud import upsert_device_token
 from Login_module.Token.Token_audit_crud import log_token_event
 from Login_module.Utils.csrf import generate_csrf_token_with_secret
+from Utm_tracking_module.Utm_tracking_crud import link_utm_rows_for_new_user
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +74,11 @@ class TwilioVerifyRequest(BaseModel):
     device_platform: str = Field(..., example="web", max_length=50)  # web/mobile/ios/android
     device_details: str = Field(..., example='{"browser":"Chrome", "version":"..."}', max_length=1000)
     fcm_token: Optional[str] = Field(None, max_length=255, description="FCM device token for push notifications")
+    utm_fingerprint: Optional[str] = Field(
+        None,
+        max_length=255,
+        description="Same fingerprint as POST /api/utm-tracking to link anonymous rows when is_new_user",
+    )
 
     @validator("country_code")
     def validate_country_code(cls, v):
@@ -95,6 +101,13 @@ class TwilioVerifyRequest(BaseModel):
         if len(v.strip()) == 0:
             raise ValueError("Device ID cannot be empty")
         return v.strip()
+
+    @validator("utm_fingerprint")
+    def validate_utm_fingerprint(cls, v):
+        if v is None:
+            return None
+        s = v.strip()
+        return s if s else None
 
 
 def _get_twilio_client():
@@ -304,6 +317,20 @@ def twilio_verify(req: TwilioVerifyRequest, request: Request, db: Session = Depe
 
         # Update session
         session.refresh_token_family_id = token_family_id
+        if is_new_user and req.utm_fingerprint:
+            try:
+                link_utm_rows_for_new_user(
+                    db,
+                    fingerprint=req.utm_fingerprint,
+                    user_id=user.id,
+                    phone=user.mobile,
+                )
+            except Exception as utm_err:
+                logger.warning(
+                    "UTM link after new user signup failed (user_id=%s): %s",
+                    user.id,
+                    utm_err,
+                )
         db.commit()
         db.refresh(session)
 

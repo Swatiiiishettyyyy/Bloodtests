@@ -2,7 +2,7 @@
 Thyrocare product catalogue models.
 Stores blood test products and their parameters locally.
 """
-from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, ForeignKey, Text
+from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, ForeignKey, Text, Computed
 from sqlalchemy.orm import relationship
 from database import Base
 from Login_module.Utils.datetime_utils import now_ist
@@ -35,9 +35,22 @@ class ThyrocareProduct(Base):
     # Category
     category = Column(String(200), nullable=True, index=True)
 
+    # Reference pricing from Thyrocare catalogue (optional; may differ from listing/selling)
+    thyrocare_price = Column(Float, nullable=True)
+
+    # Generated listing price derived from Thyrocare MRP/price
+    thyrocare_listing_price = Column(
+        Integer,
+        Computed("ROUND(thyrocare_price * 1.4)", persisted=True),
+        nullable=True,
+    )
+
     # Content (manually filled)
     about = Column(Text, nullable=True)
     short_description = Column(String(500), nullable=True)
+    what_this_test_checks = Column(Text, nullable=True)
+    who_should_take_this_test = Column(Text, nullable=True)
+    why_doctors_recommend = Column(Text, nullable=True)
 
     # Soft delete / active
     is_active = Column(Boolean, nullable=False, default=True, index=True)

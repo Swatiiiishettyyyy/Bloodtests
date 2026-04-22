@@ -58,9 +58,8 @@ def create_audit_log(
         audit_log.details = {'correlation_id': correlation_id}
     
     db.add(audit_log)
-    db.commit()
-    db.refresh(audit_log)
-    
+    db.flush()
+
     return audit_log
 
 

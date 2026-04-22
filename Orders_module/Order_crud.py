@@ -3,14 +3,17 @@ Order CRUD operations.
 """
 from sqlalchemy.orm import Session
 from sqlalchemy import func
-from datetime import datetime, date, time
+from datetime import datetime, date, time, timezone
 from typing import Optional, List, Tuple, Dict, Any
-import secrets
 from Login_module.Utils.datetime_utils import now_ist, to_ist_isoformat
 from .Order_model import (
     Order, OrderItem, OrderSnapshot, OrderStatusHistory,
     Payment, PaymentTransition, WebhookLog,
     OrderStatus, PaymentStatus, PaymentMethod
+)
+from .order_number_counter_model import (
+    OrderNumberCounter,
+    ORDER_NUMBER_SEED_LAST,
 )
 from Cart_module.Cart_model import CartItem
 from Cart_module.coupon_service import get_applied_coupon, validate_and_calculate_discount
@@ -21,6 +24,9 @@ from config import settings
 import logging
 
 logger = logging.getLogger(__name__)
+
+# Singleton row id for sequential order number counter.
+_ORDER_COUNTER_ROW_ID = 1
 
 # Lazy import to avoid circular dependency; used for order-status notifications
 def _send_order_notification(db: Session, order: Order, title: str, message: str, type: str = "info") -> None:
@@ -103,7 +109,7 @@ def schedule_order_items(
             raise ValueError(f"Scheduled date {schedule_date} for member_id={member_id} cannot be in the past")
 
         slot_time = _get_slot_time(slot)
-        scheduled_dt = datetime.combine(schedule_date, slot_time)
+        scheduled_dt = datetime.combine(schedule_date, slot_time, tzinfo=timezone.utc)
 
         # Find items for this member in this order
         member_items = [item for item in order.items if item.member_id == member_id]
@@ -238,26 +244,27 @@ def extract_payment_method_from_razorpay_payload(entity: Dict[str, Any]) -> Tupl
 
 
 def generate_order_number(db: Session) -> str:
-    """Generate unique 10-character random order number
-    Format: ORD + 7 random hex characters
-    Example: ORD7A2B1C9D
-    Guaranteed unique via database collision check (non-sequential)
     """
-    max_retries = 10
-    
-    for attempt in range(max_retries):
-        # Generate 7 random hex chars (3 bytes = 6 hex chars, take first 7)
-        random_part = secrets.token_hex(4).upper()[:7]  # 4 bytes = 8 hex, take first 7
-        order_number = f"ORD{random_part}"
-        
-        # Check if already exists in database
-        existing = db.query(Order).filter(Order.order_number == order_number).first()
-        
-        if not existing:
-            return order_number
-    
-    # Fallback (extremely unlikely with 7 hex chars and 10 retries)
-    raise ValueError("Failed to generate unique order number after retries")
+    Generate sequential order number for MySQL (transaction-safe via row lock).
+
+    Format: ORD + 10 digits
+    Example: ORD0000000001
+    """
+    row = (
+        db.query(OrderNumberCounter)
+        .filter(OrderNumberCounter.id == _ORDER_COUNTER_ROW_ID)
+        .with_for_update()
+        .one_or_none()
+    )
+    if row is None:
+        row = OrderNumberCounter(id=_ORDER_COUNTER_ROW_ID, last_value=ORDER_NUMBER_SEED_LAST)
+        db.add(row)
+        db.flush()
+
+    row.last_value = int(row.last_value) + 1
+    db.flush()
+    seq = int(row.last_value)
+    return f"ORD{seq:010d}"
 
 
 def find_existing_order_for_retry(
@@ -343,7 +350,6 @@ def create_order_from_cart(
     placed_by_member_id: Optional[int] = None,
     prevalidated_coupon_code: Optional[str] = None,
     prevalidated_coupon_discount: float = 0.0,
-    thyrocare_confirmed_amount: Optional[float] = None,
 ) -> Order:
     """
     Create order from cart items.
@@ -435,7 +441,6 @@ def create_order_from_cart(
     # Calculate subtotal and discount (price is per product, not per member)
     # For couple/family products, there are multiple cart item rows but discount applies once per product
     # This matches the cart calculation logic exactly
-    blood_test_confirmed_used = False
     for group_key, items in grouped_items.items():
         # Skip if group is empty (should not happen, but safety check)
         if not items:
@@ -449,11 +454,8 @@ def create_order_from_cart(
             thyrocare_product = item.thyrocare_product
             if not thyrocare_product:
                 raise ValueError(f"Blood test cart item {item.id} has no associated Thyrocare product")
-            if not blood_test_confirmed_used:
-                # thyrocare_confirmed_amount is the combined total for ALL blood test groups
-                subtotal += thyrocare_confirmed_amount
-                blood_test_confirmed_used = True
-            # subsequent blood test groups already counted in thyrocare_confirmed_amount
+            # Do NOT query Thyrocare cart/price-breakup for net payable. Use catalog selling_price per member.
+            subtotal += float(thyrocare_product.selling_price or 0) * len(items)
             continue
 
         # Skip if product is deleted or missing
@@ -554,16 +556,8 @@ def create_order_from_cart(
         payment.notes = f"Initial payment record created with order (Razorpay order ID: {razorpay_order_id})"
         db.flush()
     
-    # Pre-calculate per-member unit price for blood test items from confirmed amount
-    blood_test_items_count = sum(
-        1 for ci in cart_items
-        if getattr(ci, 'product_type', None) == PT.BLOOD_TEST
-    )
-    blood_test_unit_price = (
-        round(thyrocare_confirmed_amount / blood_test_items_count, 2)
-        if thyrocare_confirmed_amount and blood_test_items_count > 0
-        else 0.0
-    )
+    def _blood_test_unit_price(cart_item) -> float:
+        return float(cart_item.thyrocare_product.selling_price or 0)
 
     # Create order items and snapshots
     for cart_item in cart_items:
@@ -575,6 +569,11 @@ def create_order_from_cart(
             address_obj = cart_item.address
             if not thyrocare_product or not member or not address_obj:
                 raise ValueError(f"Missing data for blood test cart item {cart_item.id}")
+            if not cart_item.appointment_date or not cart_item.appointment_start_time:
+                raise ValueError(
+                    f"Appointment date/time not set for blood test cart item {cart_item.id} "
+                    f"(group_id={cart_item.group_id})"
+                )
 
             snapshot = OrderSnapshot(
                 order_id=order.id,
@@ -586,7 +585,7 @@ def create_order_from_cart(
                     "Name": thyrocare_product.name,
                     "SellingPrice": thyrocare_product.selling_price,
                     "ListingPrice": thyrocare_product.listing_price,
-                    "appointment_date": str(cart_item.appointment_date) if cart_item.appointment_date else None,
+                    "appointment_date": str(cart_item.appointment_date),
                     "appointment_start_time": cart_item.appointment_start_time,
                 },
                 member_data={
@@ -623,7 +622,7 @@ def create_order_from_cart(
                 address_id=cart_item.address_id,
                 snapshot_id=snapshot.id,
                 quantity=1,
-                unit_price=blood_test_unit_price,
+                unit_price=_blood_test_unit_price(cart_item),
                 order_status=OrderStatus.PENDING_PAYMENT,
             )
             db.add(order_item)
@@ -691,7 +690,11 @@ def create_order_from_cart(
                 "country": address_obj.country
             },
             cart_item_data={
-                "group_id": cart_item.group_id  # Store group_id to distinguish different packs of same product
+                "group_id": cart_item.group_id,  # Distinguish different packs of same product
+                # Genetic test per-member slot — captured at order time so it survives cart clear
+                "appointment_date": str(cart_item.appointment_date) if cart_item.appointment_date else None,
+                "appointment_start_time": cart_item.appointment_start_time,
+                "appointment_end_time": cart_item.appointment_end_time,
             }
         )
         db.add(snapshot)
@@ -1362,7 +1365,7 @@ def confirm_order_from_webhook(
             "company_address": settings.INVOICE_COMPANY_ADDRESS,
             "pan_number": settings.INVOICE_PAN_NUMBER,
             
-            "customer_name": order.user.name or "Valued Customer",
+            "customer_name": (order.user.name if order.user else None) or "Valued Customer",
             "customer_address": customer_address_str,
             
             "items": invoice_items,
@@ -2045,4 +2048,128 @@ def get_user_orders(db: Session, user_id: int, limit: int = 50, payment_status_f
     )[:limit]
     
     return all_orders
+
+
+# ------------------------------------------------------------------ #
+# Deferred order creation helpers
+# ------------------------------------------------------------------ #
+
+def create_pending_checkout(
+    db: Session,
+    user_id: int,
+    razorpay_order_id: str,
+    amount: float,
+    cart_item_ids: List[int],
+    address_id: Optional[int],
+    placed_by_member_id: Optional[int] = None,
+    coupon_code: Optional[str] = None,
+    coupon_discount: float = 0.0,
+) -> "PendingCheckout":
+    """
+    Create a PendingCheckout record when the user initiates payment.
+    No Order row is created here — no order number is allocated.
+    The Order is created only after payment is confirmed.
+    """
+    from .pending_checkout_model import PendingCheckout
+    pc = PendingCheckout(
+        user_id=user_id,
+        razorpay_order_id=razorpay_order_id,
+        amount=amount,
+        cart_item_ids=cart_item_ids,
+        address_id=address_id,
+        placed_by_member_id=placed_by_member_id,
+        coupon_code=coupon_code,
+        coupon_discount=coupon_discount,
+    )
+    db.add(pc)
+    db.commit()
+    db.refresh(pc)
+    return pc
+
+
+def create_order_post_payment(
+    db: Session,
+    pending_checkout_id: int,
+    razorpay_payment_id: str,
+    razorpay_order_id: str,
+    payment_method_details: Optional[str] = None,
+    payment_method_metadata: Optional[dict] = None,
+    webhook_log_id: Optional[int] = None,
+) -> Order:
+    """
+    Create the Order (and allocate the sequential order number) ONLY after
+    payment is confirmed — called from both verify-payment and the webhook handler.
+
+    Idempotent: if the PendingCheckout already has an order_id set another
+    call simply returns the already-created Order.
+    """
+    from sqlalchemy import select
+    from sqlalchemy.orm import joinedload
+    from .pending_checkout_model import PendingCheckout
+    from Cart_module.Cart_model import CartItem as _CartItem, ProductType as _PT
+
+    # Lock the PendingCheckout row to prevent a race between verify-payment and webhook
+    pc_stmt = (
+        select(PendingCheckout)
+        .where(PendingCheckout.id == pending_checkout_id)
+        .with_for_update()
+    )
+    pc = db.execute(pc_stmt).scalars().first()
+    if not pc:
+        raise ValueError(f"PendingCheckout {pending_checkout_id} not found")
+
+    # Idempotent: order already created (other path won the race)
+    if pc.order_id:
+        order_stmt = (
+            select(Order)
+            .options(joinedload(Order.items))
+            .where(Order.id == pc.order_id)
+        )
+        return db.execute(order_stmt).scalars().unique().first()
+
+    # Create the Order now — this is the ONLY place order numbers are allocated
+    order = create_order_from_cart(
+        db=db,
+        user_id=pc.user_id,
+        address_id=pc.address_id,
+        cart_item_ids=pc.cart_item_ids,
+        razorpay_order_id=razorpay_order_id,
+        placed_by_member_id=pc.placed_by_member_id,
+        prevalidated_coupon_code=pc.coupon_code,
+        prevalidated_coupon_discount=pc.coupon_discount,
+    )
+    # create_order_from_cart commits internally — order + payment row now exist
+
+    # Link PendingCheckout → Order so subsequent calls are idempotent
+    pc.order_id = order.id
+    db.flush()
+
+    # Immediately confirm the order (payment is already captured)
+    order = confirm_order_from_webhook(
+        db=db,
+        order_id=order.id,
+        razorpay_order_id=razorpay_order_id,
+        razorpay_payment_id=razorpay_payment_id,
+        webhook_log_id=webhook_log_id,
+        payment_method_details=payment_method_details,
+        payment_method_metadata=payment_method_metadata,
+    )
+
+    # Book Thyrocare orders for any blood test items (non-blocking).
+    # IMPORTANT: PendingCheckout flow previously confirmed payment but skipped booking entirely,
+    # which meant no Thyrocare API call was made and no failed-bookings were recorded.
+    try:
+        from Thyrocare_module.thyrocare_booking_service import book_thyrocare_for_order
+
+        book_thyrocare_for_order(db, order)
+    except Exception as thyrocare_err:
+        # Do NOT fail post-payment order creation; booking can be retried via
+        # POST /thyrocare/orders/retry-booking/{order_id}
+        logger.error(
+            f"Thyrocare booking failed for order {getattr(order, 'order_number', None) or order.id}: {thyrocare_err}"
+        )
+
+    db.commit()
+    db.refresh(order)
+    return order
 

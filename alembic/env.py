@@ -33,7 +33,10 @@ from Address_module.Address_audit_model import AddressAudit
 from Cart_module.Cart_audit_model import AuditLog
 from Audit_module.Profile_audit_crud import ProfileAuditLog
 from Login_module.Device.Device_session_audit_model import SessionAuditLog
+from Orders_module.order_number_counter_model import OrderNumberCounter
+from Orders_module.pending_checkout_model import PendingCheckout
 from Thyrocare_module.Thyrocare_model import ThyrocareProduct, ThyrocarePincode
+from Thyrocare_module.thyrocare_ref_order_counter_model import ThyrocareRefOrderCounter
 from Thyrocare_module.thyrocare_webhook_model import ThyrocareOrderTracking, ThyrocarePatientTracking, ThyrocareOrderStatusHistory
 from Thyrocare_module.thyrocare_lab_result_model import ThyrocareLabResult
 from Login_module.OTP.OTP_Log_Model import OTPAuditLog
@@ -42,6 +45,7 @@ from Consent_module.Consent_model import UserConsent, ConsentProduct, PartnerCon
 from GeneticTest_module.GeneticTest_model import GeneticTestParticipant
 from Tracking_module.Tracking_model import TrackingRecord  # Location & Analytics Tracking
 from Enquiry_module.Enquiry_model import EnquiryRequest
+from Utm_tracking_module.Utm_tracking_model import UtmTracking
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

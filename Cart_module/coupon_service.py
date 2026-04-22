@@ -275,8 +275,7 @@ def apply_coupon_to_cart(
         existing_cart_coupon.coupon_code = coupon.coupon_code
         existing_cart_coupon.discount_amount = discount_amount
         existing_cart_coupon.applied_at = now_ist()
-        db.commit()
-        db.refresh(existing_cart_coupon)
+        db.flush()
         logger.info(f"Updated existing CartCoupon record for user {user_id}")
     else:
         cart_coupon = CartCoupon(
@@ -287,8 +286,7 @@ def apply_coupon_to_cart(
             applied_at=now_ist(),
         )
         db.add(cart_coupon)
-        db.commit()
-        db.refresh(cart_coupon)
+        db.flush()
         logger.info(f"Created new CartCoupon record for user {user_id}")
 
     return True, discount_amount, f"Coupon '{coupon.coupon_code}' applied successfully", coupon

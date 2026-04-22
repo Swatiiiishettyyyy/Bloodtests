@@ -12,12 +12,22 @@ class CreateOrderRequest(BaseModel):
 
 
 class RazorpayOrderResponse(BaseModel):
-    """Response after creating order with Razorpay order details"""
+    """
+    Response after initiating checkout.
+
+    order_id       — ID to pass back in verify-payment (may refer to a
+                     PendingCheckout for new checkouts, or a real Order for
+                     payment-retry flows).
+    order_number   — None for new checkouts (allocated after payment).
+                     Present for retry flows where the Order already exists.
+    pending_checkout_id — set for new checkouts, None for retries.
+    """
     order_id: int
-    order_number: str
+    order_number: Optional[str] = None
     razorpay_order_id: str
     amount: float
     currency: str = "INR"
+    pending_checkout_id: Optional[int] = None
 
 
 class VerifyPaymentRequest(BaseModel):
@@ -92,6 +102,12 @@ class OrderItemTracking(BaseModel):
     technician_contact: Optional[str] = None
     created_at: Optional[str] = None
     status_history: List[Dict[str, Any]] = []
+    # Thyrocare: one nucleotide order can map to multiple vendor orders (per visit / product bucket)
+    thyrocare_order_id: Optional[str] = None
+    thyrocare_ref_order_no: Optional[str] = None
+    thyrocare_booking_status: Optional[str] = None
+    thyrocare_product_id: Optional[int] = None
+    thyrocare_catalog_product_id: Optional[str] = None
 
 
 class OrderTrackingResponse(BaseModel):
@@ -129,6 +145,11 @@ class OrderItemTrackingResponse(BaseModel):
     scheduled_date: Optional[str] = None
     technician_name: Optional[str] = None
     technician_contact: Optional[str] = None
+    thyrocare_order_id: Optional[str] = None
+    thyrocare_ref_order_no: Optional[str] = None
+    thyrocare_booking_status: Optional[str] = None
+    thyrocare_product_id: Optional[int] = None
+    thyrocare_catalog_product_id: Optional[str] = None
 
 
 class OrderResponse(BaseModel):

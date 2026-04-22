@@ -30,6 +30,11 @@ class VerifyOTPRequest(BaseModel):
     device_platform: str = Field(..., example="web", max_length=50)  # web/mobile/ios/android
     device_details: str = Field(..., example='{"browser":"Chrome", "version":"..."}', max_length=1000)
     fcm_token: Optional[str] = Field(None, max_length=255, description="FCM device token for push notifications")
+    utm_fingerprint: Optional[str] = Field(
+        None,
+        max_length=255,
+        description="Same fingerprint as POST /api/utm-tracking to link anonymous rows when is_new_user",
+    )
     
     @validator('country_code')
     def validate_country_code(cls, v):
@@ -52,6 +57,13 @@ class VerifyOTPRequest(BaseModel):
         if len(v.strip()) == 0:
             raise ValueError('Device ID cannot be empty')
         return v.strip()
+
+    @validator('utm_fingerprint')
+    def validate_utm_fingerprint(cls, v):
+        if v is None:
+            return None
+        s = v.strip()
+        return s if s else None
 
 
 # Response schemas

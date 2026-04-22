@@ -25,6 +25,7 @@ class OrderStatus(str, enum.Enum):
     SAMPLE_RECEIVED_BY_LAB = "SAMPLE_RECEIVED_BY_LAB"
     TESTING_IN_PROGRESS = "TESTING_IN_PROGRESS"
     REPORT_READY = "REPORT_READY"
+    CANCELLED = "CANCELLED"  # Order cancelled (e.g. by Thyrocare after booking)
 
 
 class PaymentStatus(str, enum.Enum):
@@ -246,7 +247,7 @@ class WebhookLog(Base):
     
     # Webhook event details
     event_type = Column(String(100), nullable=False, index=True)  # e.g., "payment.captured", "payment.failed"
-    event_id = Column(String(255), nullable=True, unique=True, index=True)  # Razorpay event ID (unique)
+    event_id = Column(String(255), nullable=True, index=True)  # Razorpay event ID (not unique — retries send same event_id)
     
     # Webhook payload (stored as JSON)
     payload = Column(JSON, nullable=False)  # Full webhook payload

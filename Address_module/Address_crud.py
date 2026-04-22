@@ -10,54 +10,65 @@ from .location_validator import is_serviceable_location, is_serviceable_pincode
 
 logger = logging.getLogger(__name__)
 
-def save_address(db: Session, user, req, request: Optional[Request] = None, correlation_id: Optional[str] = None):
+def save_address(
+    db: Session,
+    user,
+    req,
+    request: Optional[Request] = None,
+    correlation_id: Optional[str] = None,
+    *,
+    skip_serviceability_validation: bool = False,
+    skip_cart_lock_when_editing: bool = False,
+):
     """
     Save or update address (create if address_id=0, update if address_id>0).
-    Validates city name against the serviceable_locations table.
-    No pincode lookup or autofill - all fields must be provided manually.
+    By default validates city/pincode against serviceable tables.
+    When skip_serviceability_validation is True (e.g. Thyrocare), those checks are omitted.
+    When skip_cart_lock_when_editing is True, addresses referenced by cart items may still be edited.
     """
     # Ensure country is always set (default to India)
     if not req.country or req.country.strip() == "":
         req.country = "India"
-    
-    # Validate that city and state are provided (applies to both create and edit)
-    if not req.city or req.city.strip() == "":
-        msg = "City is required."
-        logger.warning(msg)
-        raise HTTPException(status_code=422, detail=msg)
-    
-    if not req.state or req.state.strip() == "":
-        msg = "State is required."
-        logger.warning(msg)
-        raise HTTPException(status_code=422, detail=msg)
 
-    # Validate that the city name is in serviceable locations (from serviceable_locations table)
-    # This validation applies to both new addresses and address updates
-    if not is_serviceable_location(req.city, None, db):
-        logger.warning(
-            "Address rejected for user %s: city='%s' not serviceable. Pincode: %s. "
-            "City is not in serviceable locations table.",
-            user.id,
-            req.city,
-            req.postal_code,
-        )
-        raise HTTPException(
-            status_code=422,
-            detail="Sample cannot be collected in your location. Please choose a different location."
-        )
+    if not skip_serviceability_validation:
+        # Validate that city and state are provided (applies to both create and edit)
+        if not req.city or req.city.strip() == "":
+            msg = "City is required."
+            logger.warning(msg)
+            raise HTTPException(status_code=422, detail=msg)
 
-    # Validate pincode against service_locations table (if pincode provided)
-    if req.postal_code and not is_serviceable_pincode(req.postal_code, db):
-        logger.warning(
-            "Address rejected for user %s: pincode='%s' not serviceable. City: %s.",
-            user.id,
-            req.postal_code,
-            req.city,
-        )
-        raise HTTPException(
-            status_code=422,
-            detail="Sorry, we don't currently serve this pincode. Please enter a different one."
-        )
+        if not req.state or req.state.strip() == "":
+            msg = "State is required."
+            logger.warning(msg)
+            raise HTTPException(status_code=422, detail=msg)
+
+        # Validate that the city name is in serviceable locations (from serviceable_locations table)
+        # This validation applies to both new addresses and address updates
+        if not is_serviceable_location(req.city, None, db):
+            logger.warning(
+                "Address rejected for user %s: city='%s' not serviceable. Pincode: %s. "
+                "City is not in serviceable locations table.",
+                user.id,
+                req.city,
+                req.postal_code,
+            )
+            raise HTTPException(
+                status_code=422,
+                detail="Sample cannot be collected in your location. Please choose a different location."
+            )
+
+        # Validate pincode against service_locations table (if pincode provided)
+        if req.postal_code and not is_serviceable_pincode(req.postal_code, db):
+            logger.warning(
+                "Address rejected for user %s: pincode='%s' not serviceable. City: %s.",
+                user.id,
+                req.postal_code,
+                req.city,
+            )
+            raise HTTPException(
+                status_code=422,
+                detail="Sorry, we don't currently serve this pincode. Please enter a different one."
+            )
     
     # Get IP and user agent
     ip_address = None
@@ -106,26 +117,25 @@ def save_address(db: Session, user, req, request: Optional[Request] = None, corr
             return None
         
         # Check if address is associated with cart items - prevent editing if in cart
-        from Cart_module.Cart_model import CartItem
-        
-        cart_items = db.query(CartItem).filter(
-            CartItem.address_id == req.address_id,
-            CartItem.user_id == user.id,
-            CartItem.is_deleted == False  # Exclude deleted items
-        ).all()
-        
-        if cart_items:
-            # Get product names for better error message
-            product_names = set()
-            for item in cart_items:
-                if item.product:
-                    product_names.add(item.product.Name)
-            
-            products_str = ", ".join(product_names) if product_names else "items"
-            raise HTTPException(
-                status_code=422,
-                detail="This address is currently in your cart and cannot be edited. Please remove the cart item first."
-            )
+        if not skip_cart_lock_when_editing:
+            from Cart_module.Cart_model import CartItem
+
+            cart_items = db.query(CartItem).filter(
+                CartItem.address_id == req.address_id,
+                CartItem.user_id == user.id,
+                CartItem.is_deleted == False  # Exclude deleted items
+            ).all()
+
+            if cart_items:
+                product_names = set()
+                for item in cart_items:
+                    if item.product:
+                        product_names.add(item.product.Name)
+
+                raise HTTPException(
+                    status_code=422,
+                    detail="This address is currently in your cart and cannot be edited. Please remove the cart item first."
+                )
         
         # Store old data before update
         old_data = {

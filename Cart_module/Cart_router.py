@@ -15,7 +15,7 @@ from Address_module.Address_model import Address
 from Member_module.Member_model import Member
 from Login_module.User.user_model import User
 from Thyrocare_module.Thyrocare_model import ThyrocareProduct
-from .Cart_schema import CartAdd, CartUpdate, ApplyCouponRequest, CouponCreate, AllowlistAddRequest, AllowlistRemoveRequest, AllowlistEntryResponse, BloodTestCartAdd
+from .Cart_schema import CartAdd, CartUpdate, ApplyCouponRequest, CouponCreate, AllowlistAddRequest, AllowlistRemoveRequest, AllowlistEntryResponse, GeneticSlotSet, GeneticSlotClear
 from deps import get_db
 from Login_module.Utils.auth_user import get_current_user, get_current_member
 from Login_module.Utils.datetime_utils import to_ist_isoformat
@@ -30,6 +30,10 @@ from .coupon_service import (
     is_user_allowed_for_coupon
 )
 from .Coupon_model import Coupon, CouponType, CouponStatus
+from .blood_test_cart_utils import (
+    retire_superseded_blood_test_lines,
+    filter_latest_blood_test_group_per_product,
+)
 
 router = APIRouter(prefix="/cart", tags=["Cart"])
 
@@ -374,164 +378,6 @@ def add_to_cart(
         raise HTTPException(status_code=500, detail="We couldn't add items to your cart. Please try again.")
 
 
-@router.post("/add-blood-test")
-def add_blood_test_to_cart(
-    item: BloodTestCartAdd,
-    request: Request,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """
-    Add a Thyrocare blood test product to cart.
-    All members share the same address (home collection).
-    Creates one CartItem row per member, all linked by group_id.
-    """
-    try:
-        from .Cart_model import ProductType as PT
-
-        # Validate thyrocare product
-        thyrocare_product = db.query(ThyrocareProduct).filter(
-            ThyrocareProduct.id == item.thyrocare_product_id,
-            ThyrocareProduct.is_deleted == False,
-            ThyrocareProduct.is_active == True
-        ).first()
-        if not thyrocare_product:
-            raise HTTPException(status_code=404, detail="Blood test product not found.")
-
-        member_ids = [m.member_id for m in item.members]
-        num_members = len(member_ids)
-
-        # Validate beneficiary count
-        if num_members < thyrocare_product.beneficiaries_min:
-            raise HTTPException(
-                status_code=422,
-                detail=f"This test requires at least {thyrocare_product.beneficiaries_min} member(s). You selected {num_members}."
-            )
-        if num_members > thyrocare_product.beneficiaries_max:
-            raise HTTPException(
-                status_code=422,
-                detail=f"This test allows at most {thyrocare_product.beneficiaries_max} member(s). You selected {num_members}."
-            )
-
-        # Validate address belongs to user
-        address = db.query(Address).filter(
-            Address.id == item.address_id,
-            Address.user_id == current_user.id,
-            Address.is_deleted == False
-        ).first()
-        if not address:
-            raise HTTPException(status_code=422, detail="Address not found or doesn't belong to your account.")
-
-        # Validate members belong to user
-        members = db.query(Member).filter(
-            Member.id.in_(member_ids),
-            Member.user_id == current_user.id
-        ).all()
-        if len(members) != num_members:
-            raise HTTPException(status_code=422, detail="One or more members not found in your account.")
-
-        # Check if same thyrocare product + same members already in cart
-        existing = db.query(CartItem).filter(
-            CartItem.user_id == current_user.id,
-            CartItem.thyrocare_product_id == item.thyrocare_product_id,
-            CartItem.product_type == PT.BLOOD_TEST,
-            CartItem.is_deleted == False
-        ).all()
-        if existing:
-            from collections import defaultdict
-            grouped = defaultdict(list)
-            for ci in existing:
-                grouped[ci.group_id].append(ci)
-            requested_set = set(member_ids)
-            for grp_items in grouped.values():
-                if set(ci.member_id for ci in grp_items) == requested_set:
-                    raise HTTPException(
-                        status_code=422,
-                        detail="This blood test with the same members is already in your cart."
-                    )
-
-        ip, user_agent = get_client_info(request)
-        group_id = f"{current_user.id}_bt_{thyrocare_product.id}_{uuid.uuid4().hex}"
-        cart = get_or_create_user_cart(db, current_user.id)
-
-        created_items = []
-        try:
-            for member_id in member_ids:
-                cart_item = CartItem(
-                    user_id=current_user.id,
-                    cart_id=cart.id,
-                    product_type=PT.BLOOD_TEST,
-                    thyrocare_product_id=thyrocare_product.id,
-                    address_id=item.address_id,
-                    member_id=member_id,
-                    quantity=1,
-                    group_id=group_id,
-                    appointment_date=item.appointment_date,
-                    appointment_start_time=item.appointment_start_time,
-                )
-                db.add(cart_item)
-                created_items.append(cart_item)
-
-            from Login_module.Utils.datetime_utils import now_ist
-            cart.last_activity_at = now_ist()
-            db.flush()
-            db.commit()
-            for ci in created_items:
-                db.refresh(ci)
-        except Exception:
-            db.rollback()
-            raise HTTPException(status_code=500, detail="Something went wrong while adding the blood test to your cart.")
-
-        correlation_id = str(uuid.uuid4())
-        create_audit_log(
-            db=db,
-            user_id=current_user.id,
-            action="ADD",
-            entity_type="CART_ITEM",
-            entity_id=created_items[0].id,
-            cart_id=cart.id,
-            details={
-                "product_type": "blood_test",
-                "thyrocare_product_id": thyrocare_product.id,
-                "thyrocare_id": thyrocare_product.thyrocare_id,
-                "member_ids": member_ids,
-                "address_id": item.address_id,
-                "group_id": group_id,
-                "cart_items_created": len(created_items),
-            },
-            ip_address=ip,
-            user_agent=user_agent,
-            username=current_user.name or current_user.mobile,
-            correlation_id=correlation_id
-        )
-
-        return {
-            "status": "success",
-            "message": "Blood test added to cart successfully.",
-            "data": {
-                "cart_item_ids": [ci.id for ci in created_items],
-                "cart_id": cart.id,
-                "thyrocare_product_id": thyrocare_product.id,
-                "thyrocare_id": thyrocare_product.thyrocare_id,
-                "product_name": thyrocare_product.name,
-                "address_id": item.address_id,
-                "member_ids": member_ids,
-                "members_count": num_members,
-                "price_per_member": thyrocare_product.selling_price,
-                "total_amount": thyrocare_product.selling_price * num_members,
-                "group_id": group_id,
-                "appointment_date": str(item.appointment_date) if item.appointment_date else None,
-                "appointment_start_time": item.appointment_start_time,
-            }
-        }
-    except HTTPException:
-        db.rollback()
-        raise
-    except Exception:
-        db.rollback()
-        raise HTTPException(status_code=500, detail="We couldn't add the blood test to your cart. Please try again.")
-
-
 @router.put("/update/{cart_item_id}")
 def update_cart_item(
     cart_item_id: int,
@@ -590,10 +436,13 @@ def update_cart_item(
         db.refresh(cart_item)
 
         product = cart_item.product
-        
+
         # Audit log
         ip, user_agent = get_client_info(request)
         correlation_id = str(uuid.uuid4())
+        product_id_for_audit = (
+            product.ProductId if product else cart_item.thyrocare_product_id or cart_item.product_id
+        )
         create_audit_log(
             db=db,
             user_id=current_user.id,
@@ -602,7 +451,7 @@ def update_cart_item(
             entity_id=cart_item.id,
             cart_id=cart_id,  # Use proper cart.id
             details={
-                "product_id": product.ProductId,
+                "product_id": product_id_for_audit,
                 "old_quantity": old_quantity,
                 "new_quantity": update.quantity,
                 "group_id": group_id,
@@ -651,11 +500,16 @@ def delete_cart_item(
     cart_item = db.query(CartItem).filter(
         CartItem.id == cart_item_id,
         CartItem.user_id == current_user.id,
-        CartItem.is_deleted == False  # Only allow deleting non-deleted items
     ).first()
-    
+
     if not cart_item:
-        raise HTTPException(status_code=404, detail="This item has already been removed from your cart.")
+        raise HTTPException(status_code=404, detail="Cart item not found.")
+
+    if cart_item.is_deleted:
+        return {
+            "status": "success",
+            "message": "This item has already been removed from your cart.",
+        }
 
     product_id = cart_item.product_id
     quantity = cart_item.quantity
@@ -817,6 +671,227 @@ def clear_cart(
     }
 
 
+@router.put("/genetic/slot/{cart_item_id}")
+def set_genetic_slot(
+    cart_item_id: int,
+    slot: GeneticSlotSet,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Set (or update) the appointment slot for a single genetic test cart item.
+
+    Genetic tests assign an independent slot to each member — call this endpoint
+    once per member (cart item) in the group to configure their individual
+    collection date and time range (e.g. 09:00–10:00).
+
+    The cart_item_id must belong to the authenticated user and must be a
+    GENETIC product type.
+    """
+    from datetime import date as _date
+    from Login_module.Utils.datetime_utils import now_ist
+
+    cart_item = db.query(CartItem).filter(
+        CartItem.id == cart_item_id,
+        CartItem.user_id == current_user.id,
+        CartItem.is_deleted == False,
+    ).first()
+
+    if not cart_item:
+        raise HTTPException(status_code=404, detail="Cart item not found.")
+
+    if str(getattr(cart_item, "product_type", "")).lower() == "blood_test":
+        raise HTTPException(
+            status_code=422,
+            detail="This endpoint is for genetic products only. "
+                   "Use /thyrocare/cart/set-appointment for blood tests."
+        )
+
+    # Date must not be in the past
+    if slot.appointment_date < _date.today():
+        raise HTTPException(status_code=422, detail="Appointment date cannot be in the past.")
+
+    # Start time must be before end time
+    if slot.appointment_start_time >= slot.appointment_end_time:
+        raise HTTPException(
+            status_code=422,
+            detail="appointment_start_time must be earlier than appointment_end_time."
+        )
+
+    cart_item.appointment_date = slot.appointment_date
+    cart_item.appointment_start_time = slot.appointment_start_time
+    cart_item.appointment_end_time = slot.appointment_end_time
+
+    # Update cart activity timestamp
+    if cart_item.cart_id:
+        cart = db.query(Cart).filter(Cart.id == cart_item.cart_id).first()
+        if cart:
+            cart.last_activity_at = now_ist()
+
+    db.commit()
+    db.refresh(cart_item)
+
+    ip, user_agent = get_client_info(request)
+    create_audit_log(
+        db=db,
+        user_id=current_user.id,
+        action="SET_GENETIC_SLOT",
+        entity_type="CART_ITEM",
+        entity_id=cart_item.id,
+        cart_id=cart_item.cart_id,
+        details={
+            "product_id": cart_item.product_id,
+            "group_id": cart_item.group_id,
+            "member_id": cart_item.member_id,
+            "appointment_date": str(slot.appointment_date),
+            "appointment_start_time": slot.appointment_start_time,
+            "appointment_end_time": slot.appointment_end_time,
+        },
+        ip_address=ip,
+        user_agent=user_agent,
+        username=current_user.name or current_user.mobile,
+    )
+
+    return {
+        "status": "success",
+        "message": "Slot set successfully for this member.",
+        "data": {
+            "cart_item_id": cart_item.id,
+            "member_id": cart_item.member_id,
+            "group_id": cart_item.group_id,
+            "appointment_date": str(slot.appointment_date),
+            "appointment_start_time": slot.appointment_start_time,
+            "appointment_end_time": slot.appointment_end_time,
+        }
+    }
+
+
+@router.delete("/genetic/slot/{cart_item_id}")
+def clear_genetic_slot(
+    cart_item_id: int,
+    body: GeneticSlotClear,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Clear the appointment slot for a genetic test cart item.
+
+    Pass `clear_all_in_group: true` to clear slots for every member in the
+    same group at once (useful when the user wants to repick a date for all).
+    """
+    from Login_module.Utils.datetime_utils import now_ist
+
+    cart_item = db.query(CartItem).filter(
+        CartItem.id == cart_item_id,
+        CartItem.user_id == current_user.id,
+        CartItem.is_deleted == False,
+    ).first()
+
+    if not cart_item:
+        raise HTTPException(status_code=404, detail="Cart item not found.")
+
+    if str(getattr(cart_item, "product_type", "")).lower() == "blood_test":
+        raise HTTPException(status_code=422, detail="This endpoint is for genetic products only.")
+
+    if body.clear_all_in_group and cart_item.group_id:
+        items_to_clear = db.query(CartItem).filter(
+            CartItem.group_id == cart_item.group_id,
+            CartItem.user_id == current_user.id,
+            CartItem.is_deleted == False,
+        ).all()
+    else:
+        items_to_clear = [cart_item]
+
+    for ci in items_to_clear:
+        ci.appointment_date = None
+        ci.appointment_start_time = None
+        ci.appointment_end_time = None
+
+    if cart_item.cart_id:
+        cart = db.query(Cart).filter(Cart.id == cart_item.cart_id).first()
+        if cart:
+            cart.last_activity_at = now_ist()
+
+    db.commit()
+
+    return {
+        "status": "success",
+        "message": f"Slot cleared for {len(items_to_clear)} member(s).",
+        "data": {"cleared_cart_item_ids": [ci.id for ci in items_to_clear]}
+    }
+
+
+@router.delete("/genetic/group/{group_id}")
+def delete_genetic_group(
+    group_id: str,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Remove an entire genetic test group (all members) from the cart.
+    Soft-deletes every CartItem that shares this group_id.
+    """
+    from Login_module.Utils.datetime_utils import now_ist
+
+    items = db.query(CartItem).filter(
+        CartItem.group_id == group_id,
+        CartItem.user_id == current_user.id,
+        CartItem.is_deleted == False,
+    ).all()
+
+    if not items:
+        raise HTTPException(status_code=404, detail="No active cart items found for this group.")
+
+    # Verify all items are genetic
+    for ci in items:
+        if str(getattr(ci, "product_type", "")).lower() == "blood_test":
+            raise HTTPException(
+                status_code=422,
+                detail="This endpoint is for genetic groups only. "
+                       "Use /cart/delete/{cart_item_id} for blood tests."
+            )
+
+    cart_id = items[0].cart_id
+    for ci in items:
+        ci.is_deleted = True
+
+    remove_coupon_from_cart(db, current_user.id)
+
+    if cart_id:
+        cart = db.query(Cart).filter(Cart.id == cart_id).first()
+        if cart:
+            cart.last_activity_at = now_ist()
+
+    db.commit()
+
+    ip, user_agent = get_client_info(request)
+    create_audit_log(
+        db=db,
+        user_id=current_user.id,
+        action="DELETE",
+        entity_type="CART_ITEM",
+        entity_id=items[0].id,
+        cart_id=cart_id,
+        details={
+            "group_id": group_id,
+            "items_deleted": len(items),
+            "member_ids": [ci.member_id for ci in items],
+        },
+        ip_address=ip,
+        user_agent=user_agent,
+        username=current_user.name or current_user.mobile,
+    )
+
+    return {
+        "status": "success",
+        "message": f"Genetic group removed. {len(items)} member(s) cleared from cart.",
+        "data": {"group_id": group_id, "items_deleted": len(items)}
+    }
+
+
 @router.get("/view")
 def view_cart(
     request: Request,
@@ -862,7 +937,8 @@ def view_cart(
         )
     
     all_cart_items = query.order_by(CartItem.group_id, CartItem.created_at).all()
-    
+    all_cart_items = filter_latest_blood_test_group_per_product(all_cart_items)
+
     # If cart doesn't exist but user has items, create cart now
     if not cart and all_cart_items:
         cart = get_or_create_user_cart(db, current_user.id)
@@ -1026,7 +1102,13 @@ def view_cart(
 
                 member_address_map.append({
                     "member": member_details,
-                    "address": address_details
+                    "address": address_details,
+                    "slot": {
+                        "appointment_date": str(i.appointment_date) if i.appointment_date else None,
+                        "appointment_start_time": i.appointment_start_time,
+                        "appointment_end_time": i.appointment_end_time,
+                        "slot_set": i.appointment_date is not None,
+                    }
                 })
 
             # Get unique address IDs (may be 1 or multiple)
@@ -1038,6 +1120,9 @@ def view_cart(
 
             # Calculate discount per item (difference between price and special_price)
             discount_per_item = product.Price - product.SpecialPrice
+
+            # True only when every member in the group has a slot assigned
+            slots_complete = all(i.appointment_date is not None for i in items)
 
             cart_item_details.append({
                 "product_type": "genetic",
@@ -1057,6 +1142,8 @@ def view_cart(
                 "discount_per_item": discount_per_item,
                 "total_amount": total,
                 "group_id": item.group_id,
+                "slots_complete": slots_complete,
+                "slot_hint": "Use PUT /cart/genetic/slot/{cart_item_id} to set per-member slots." if not slots_complete else None,
             })
         # end else (genetic)
 
@@ -1088,7 +1175,7 @@ def view_cart(
             # Update the stored discount amount if it changed significantly
             if abs(applied_coupon.discount_amount - calculated_discount) > 0.01:
                 applied_coupon.discount_amount = calculated_discount
-                db.commit()
+                db.flush()
                 logger.info(f"Updated coupon discount from {applied_coupon.discount_amount} to {calculated_discount} for user {current_user.id}")
         else:
             # Validation failed
@@ -1133,10 +1220,15 @@ def view_cart(
     if not cart_id and cart_items:
         cart_id = cart_items[0].cart_id if cart_items[0].cart_id else None
 
+    # Summary counts must match the rendered cart_items list (product lines + row counts),
+    # not len(grouped_items) / len(cart_items), so headers/titles stay in sync after deletes.
+    visible_line_count = len(cart_item_details)
+    visible_row_count = sum(len(entry["cart_item_ids"]) for entry in cart_item_details)
+
     summary = {
         "cart_id": cart_id,
-        "total_items": len(grouped_items),
-        "total_cart_items": len(cart_items),
+        "total_items": visible_line_count,
+        "total_cart_items": visible_row_count,
         "subtotal_amount": subtotal_amount,
         "discount_amount": discount_amount,
         "coupon_amount": coupon_amount,
@@ -1157,8 +1249,8 @@ def view_cart(
         action="VIEW",
         entity_type="CART",
         details={
-            "items_count": len(cart_items),
-            "product_groups": len(grouped_items),
+            "items_count": visible_row_count,
+            "product_groups": visible_line_count,
             "grand_total": grand_total,
             "cart_id": cart_id
         },
@@ -1582,11 +1674,12 @@ def add_coupon_allowlist(
         )
         db.add(new_entry)
         try:
-            db.flush()
+            with db.begin_nested():
+                db.flush()
             added += 1
             added_entries.append(new_entry)
         except IntegrityError:
-            db.rollback()
+            pass  # duplicate entry — skip without rolling back the outer transaction
     db.commit()
     for e in added_entries:
         db.refresh(e)
