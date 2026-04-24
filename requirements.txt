@@ -17,6 +17,8 @@ alembic
 boto3
 python-multipart
 bcrypt
+docling>=1.0.0
+pymupdf>=1.23.0
 # Google API packages for gmeet_api
 google-api-python-client>=2.100.0
 google-auth-oauthlib>=1.1.0

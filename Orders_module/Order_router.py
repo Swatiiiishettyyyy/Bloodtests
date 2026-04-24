@@ -3,7 +3,7 @@ Order router - handles order creation, payment, and tracking.
 """
 from fastapi import APIRouter, Depends, Header, HTTPException, status, Request
 from sqlalchemy.orm import Session
-from sqlalchemy import or_
+from sqlalchemy import or_, text
 from typing import List, Optional, Dict, Callable
 from collections import defaultdict
 import uuid
@@ -43,6 +43,7 @@ from .Order_model import OrderStatus, PaymentStatus, PaymentMethod, Order, Order
 from Cart_module.Cart_model import CartItem, Cart
 from Notification_module.Notification_crud import send_notification_to_user
 from config import settings
+from .order_number_service import ORDER_NUMBER_BASE
 import razorpay
 
 # Admin password for PUT order status endpoint — set ORDER_STATUS_PASSWORD env var in production
@@ -62,6 +63,47 @@ def verify_order_status_password(
         )
 
 logger = logging.getLogger(__name__)
+
+@router.post("/internal/order-number/reset")
+def reset_order_number_sequence(
+    allow_if_orders_exist: bool = False,
+    db: Session = Depends(get_db),
+):
+    """
+    Internal tooling endpoint (non-production only).
+
+    Requires env: ALLOW_ORDER_NUMBER_RESET=true
+    By default refuses to reset if any orders exist (override with allow_if_orders_exist=true).
+    """
+    if str(getattr(settings, "ENVIRONMENT", "")).lower() == "production":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed in production.")
+
+    if not getattr(settings, "ALLOW_ORDER_NUMBER_RESET", False):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Order number reset is disabled.")
+
+    try:
+        orders_count = int(db.execute(text("SELECT COUNT(*) FROM orders")).scalar() or 0)
+    except Exception:
+        orders_count = 0
+
+    if orders_count > 0 and not allow_if_orders_exist:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Refusing to reset because orders exist. Pass allow_if_orders_exist=true to override.",
+        )
+
+    # Prefer TRUNCATE for MySQL to reset AUTO_INCREMENT; fall back for other DBs.
+    try:
+        db.execute(text("TRUNCATE TABLE order_number_sequence"))
+    except Exception:
+        db.execute(text("DELETE FROM order_number_sequence"))
+        try:
+            db.execute(text("DELETE FROM sqlite_sequence WHERE name='order_number_sequence'"))
+        except Exception:
+            pass
+    db.commit()
+
+    return {"next_order_number": str(ORDER_NUMBER_BASE + 1)}
 
 
 def get_client_info(request: Request):
@@ -582,6 +624,7 @@ def create_order(
         )
 
 
+@router.post("/verify", response_model=PaymentVerificationResponse)
 @router.post("/verify-payment", response_model=PaymentVerificationResponse)
 def verify_payment(
     payment_data: VerifyPaymentRequest,

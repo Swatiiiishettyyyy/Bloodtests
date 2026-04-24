@@ -7,6 +7,7 @@ class ThyrocareTestParameterOut(BaseModel):
     id: int
     name: str
     group_name: Optional[str] = None
+    organ: Optional[str] = None
 
     class Config:
         from_attributes = True

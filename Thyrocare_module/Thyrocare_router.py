@@ -1607,6 +1607,8 @@ def _fetch_and_store_lab_results(thyrocare_order_id: str, patient_id: str) -> No
     import requests as _req
     import xml.etree.ElementTree as ET
     from datetime import datetime as _dt
+    from sqlalchemy import func as _func
+    from .Thyrocare_model import ThyrocareTestParameter
 
     patient_id_key = (patient_id or "").strip().upper()
     db = SessionLocal()
@@ -1655,6 +1657,26 @@ def _fetch_and_store_lab_results(thyrocare_order_id: str, patient_id: str) -> No
         db.flush()
 
         for td in lead.findall(".//TESTDETAIL"):
+            test_code = (td.findtext("TEST_CODE") or "").strip() or None
+            description = (td.findtext("Description") or "").strip() or None
+
+            organ = None
+            # Fill thyrocare_lab_results.category from our master parameter table (organ).
+            # Primary match is by parameter name == XML Description (case-insensitive).
+            if description:
+                organ = (
+                    db.query(ThyrocareTestParameter.organ)
+                    .filter(_func.lower(ThyrocareTestParameter.name) == description.lower())
+                    .scalar()
+                )
+            # Fallback match by TEST_CODE if Description doesn't map.
+            if not organ and test_code:
+                organ = (
+                    db.query(ThyrocareTestParameter.organ)
+                    .filter(_func.lower(ThyrocareTestParameter.name) == test_code.lower())
+                    .scalar()
+                )
+
             sdate_str = (td.findtext("SDATE") or "").strip()
             sdate = None
             if sdate_str:
@@ -1667,8 +1689,8 @@ def _fetch_and_store_lab_results(thyrocare_order_id: str, patient_id: str) -> No
                 thyrocare_order_id=thyrocare_order_id,
                 patient_id=lead_id,
                 order_no=order_no or None,
-                test_code=(td.findtext("TEST_CODE") or "").strip() or None,
-                description=(td.findtext("Description") or "").strip() or None,
+                test_code=test_code,
+                description=description,
                 test_value=(td.findtext("TEST_VALUE") or "").strip() or None,
                 normal_val=(td.findtext("NORMAL_VAL") or "").strip() or None,
                 units=(td.findtext("UNITS") or "").strip() or None,
@@ -1676,7 +1698,7 @@ def _fetch_and_store_lab_results(thyrocare_order_id: str, patient_id: str) -> No
                 report_group=(td.findtext("REPORT_GROUP_ID") or "").strip() or None,
                 sample_date=sdate,
                 source="nucleotide",
-                category=None,
+                category=organ,
                 member_id=resolved_member_id,
                 user_id=resolved_user_id,
                 created_at=now_ist(),

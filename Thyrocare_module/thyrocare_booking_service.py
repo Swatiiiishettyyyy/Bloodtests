@@ -49,10 +49,11 @@ def _blood_test_appt_from_snapshot(db: Session, oi: OrderItem) -> Tuple[Optional
 
 def _visit_bucket_key_for_order_item(db: Session, oi: OrderItem) -> Tuple[Any, ...]:
     """
-    One Thyrocare home visit = one address + one appointment (date + start time).
-    All patients on that visit share the same bucket (multiple members, merged items per patient).
+    One Thyrocare home-collection visit bucket: one address + one appointment (date + start time).
 
-    If appointment is missing from the snapshot, bucket alone so unrelated lines are not merged.
+    NOTE: Product-level splitting is applied later in book_thyrocare_for_order based on:
+    - single member in the visit: keep all products together (1 Thyrocare order)
+    - multiple members in the visit: split per product (1 Thyrocare order per product)
     """
     d, t = _blood_test_appt_from_snapshot(db, oi)
     if d is None or t is None:
@@ -92,17 +93,62 @@ def book_thyrocare_for_order(db: Session, order: Order) -> None:
 
         from collections import defaultdict
 
-        groups: Dict[Tuple[Any, ...], List[OrderItem]] = defaultdict(list)
+        # Stage 1: group by visit (address + appointment)
+        visit_groups: Dict[Tuple[Any, ...], List[OrderItem]] = defaultdict(list)
         for oi in blood_test_items:
             key = _visit_bucket_key_for_order_item(db, oi)
-            groups[key].append(oi)
+            visit_groups[key].append(oi)
+
+        # Stage 2: apply product splitting depending on member cardinality in the visit.
+        #
+        # Rule:
+        # - If a visit has exactly 1 unique member_id: keep all products together (single Thyrocare order).
+        # - If a visit has >1 unique member_id: split per thyrocare_product_id (one Thyrocare order per product).
+        #
+        # This satisfies:
+        # - single person + multiple products => 1 Thyrocare order id
+        # - multiple people + multiple products (same address/slot) => N Thyrocare order ids (N=products)
+        groups: Dict[Tuple[Any, ...], List[OrderItem]] = defaultdict(list)
+        for vkey, items in visit_groups.items():
+            non_null_mids = {oi.member_id for oi in items if oi.member_id is not None}
+            has_unknown_member = any(oi.member_id is None for oi in items)
+
+            # If any member_id is unknown, do NOT merge across products.
+            # This prevents accidental cross-member merges when data is incomplete.
+            if has_unknown_member:
+                logger.warning(
+                    "Thyrocare booking: missing member_id in visit bucket %s for order %s; "
+                    "splitting by product to avoid incorrect merges.",
+                    vkey,
+                    getattr(order, "order_number", None) or getattr(order, "id", None),
+                )
+            split_by_product = has_unknown_member or (len(non_null_mids) > 1)
+
+            if not split_by_product:
+                # Single member in this visit: keep all products together (one Thyrocare order).
+                # Normalize key shape to always include a 4th slot for stable ordering.
+                groups[tuple(list(vkey) + [0])].extend(items)
+                continue
+
+            by_prod: Dict[Any, List[OrderItem]] = defaultdict(list)
+            for oi in items:
+                by_prod[oi.thyrocare_product_id].append(oi)
+            for prod_id, prod_items in by_prod.items():
+                groups[tuple(list(vkey) + [prod_id])].extend(prod_items)
 
         service = ThyrocareService()
 
         def _sort_key(k: Tuple[Any, ...]):
             if k and k[0] == "__incomplete_appt__":
                 return (0, str(k[1]))
-            return (1, k[0] or 0, str(k[1] or ""), str(k[2] or ""))
+            # (address_id, date, time[, product_id])
+            pid = 0
+            if len(k) >= 4:
+                try:
+                    pid = int(k[3] or 0)
+                except Exception:
+                    pid = 0
+            return (1, k[0] or 0, str(k[1] or ""), str(k[2] or ""), pid)
 
         sorted_keys = sorted(groups.keys(), key=_sort_key)
 

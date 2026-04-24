@@ -80,6 +80,7 @@ class ThyrocareTestParameter(Base):
     )
     name = Column(String(300), nullable=False)
     group_name = Column(String(200), nullable=True)
+    organ = Column(String(200), nullable=True)
 
     product = relationship("ThyrocareProduct", back_populates="parameters")
 

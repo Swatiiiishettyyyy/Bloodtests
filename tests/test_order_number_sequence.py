@@ -10,29 +10,24 @@ from sqlalchemy import create_engine  # noqa: E402
 from sqlalchemy.orm import sessionmaker  # noqa: E402
 
 from database import Base  # noqa: E402
-from Orders_module.order_number_counter_model import (  # noqa: E402
-    OrderNumberCounter,
-    ORDER_NUMBER_SEED_LAST,
-)
-from Orders_module.Order_crud import generate_order_number  # noqa: E402
+from Orders_module.order_number_sequence_model import OrderNumberSequence  # noqa: E402
+from Orders_module.order_number_service import generate_order_number, ORDER_NUMBER_BASE  # noqa: E402
 
 
 def test_order_number_sequence():
     engine = create_engine("sqlite:///:memory:", future=True)
-    Base.metadata.create_all(bind=engine, tables=[OrderNumberCounter.__table__])
+    Base.metadata.create_all(bind=engine, tables=[OrderNumberSequence.__table__])
     Session = sessionmaker(bind=engine, autocommit=False, autoflush=False, future=True)
     db = Session()
     try:
-        db.add(OrderNumberCounter(id=1, last_value=ORDER_NUMBER_SEED_LAST))
+        assert generate_order_number(db) == str(ORDER_NUMBER_BASE + 1)
+        db.commit()
+        assert generate_order_number(db) == str(ORDER_NUMBER_BASE + 2)
         db.commit()
 
-        assert generate_order_number(db) == "ORD0000000001"
-        db.commit()
-        assert generate_order_number(db) == "ORD0000000002"
-        db.commit()
-
-        row = db.query(OrderNumberCounter).filter_by(id=1).one()
-        assert row.last_value == 2
+        row = db.query(OrderNumberSequence).order_by(OrderNumberSequence.id.desc()).first()
+        assert row is not None
+        assert row.id == 2
     finally:
         db.close()
 

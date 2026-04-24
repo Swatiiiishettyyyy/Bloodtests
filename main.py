@@ -91,6 +91,7 @@ from Account_module.Account_router import router as account_router
 from Enquiry_module.Enquiry_router import router as enquiry_router
 from Utm_tracking_module.Utm_tracking_router import router as utm_tracking_router
 from Thyrocare_module.Thyrocare_router import router as thyrocare_router
+from Upload_module.Upload_router import router as upload_router
 
 # Google Meet API router
 try:
@@ -634,6 +635,7 @@ app.include_router(utm_tracking_router)  # /api/utm-tracking
 app.include_router(account_router)  # /account/feedback
 app.include_router(enquiry_router)  # /enquiry (form + POST)
 app.include_router(thyrocare_router)  # /thyrocare
+app.include_router(upload_router)  # /upload
 
 # Include Google Meet API router if available
 if gmeet_router:

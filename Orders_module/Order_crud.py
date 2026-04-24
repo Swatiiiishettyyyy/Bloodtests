@@ -11,10 +11,7 @@ from .Order_model import (
     Payment, PaymentTransition, WebhookLog,
     OrderStatus, PaymentStatus, PaymentMethod
 )
-from .order_number_counter_model import (
-    OrderNumberCounter,
-    ORDER_NUMBER_SEED_LAST,
-)
+from .order_number_service import generate_order_number
 from Cart_module.Cart_model import CartItem
 from Cart_module.coupon_service import get_applied_coupon, validate_and_calculate_discount
 from Product_module.Product_model import Product
@@ -24,9 +21,6 @@ from config import settings
 import logging
 
 logger = logging.getLogger(__name__)
-
-# Singleton row id for sequential order number counter.
-_ORDER_COUNTER_ROW_ID = 1
 
 # Lazy import to avoid circular dependency; used for order-status notifications
 def _send_order_notification(db: Session, order: Order, title: str, message: str, type: str = "info") -> None:
@@ -241,30 +235,6 @@ def extract_payment_method_from_razorpay_payload(entity: Dict[str, Any]) -> Tupl
             metadata["auth_code"] = entity.get("acquirer_data", {}).get("auth_code")
     
     return payment_method, metadata if metadata else None
-
-
-def generate_order_number(db: Session) -> str:
-    """
-    Generate sequential order number for MySQL (transaction-safe via row lock).
-
-    Format: ORD + 10 digits
-    Example: ORD0000000001
-    """
-    row = (
-        db.query(OrderNumberCounter)
-        .filter(OrderNumberCounter.id == _ORDER_COUNTER_ROW_ID)
-        .with_for_update()
-        .one_or_none()
-    )
-    if row is None:
-        row = OrderNumberCounter(id=_ORDER_COUNTER_ROW_ID, last_value=ORDER_NUMBER_SEED_LAST)
-        db.add(row)
-        db.flush()
-
-    row.last_value = int(row.last_value) + 1
-    db.flush()
-    seq = int(row.last_value)
-    return f"ORD{seq:010d}"
 
 
 def find_existing_order_for_retry(
