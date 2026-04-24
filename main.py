@@ -56,7 +56,7 @@ from Utm_tracking_module.Utm_tracking_model import UtmTracking
 from Notification_module.Notification_model import Notification, UserDeviceToken
 from Thyrocare_module.Thyrocare_model import ThyrocareProduct, ThyrocareTestParameter
 from Thyrocare_module.thyrocare_ref_order_counter_model import ThyrocareRefOrderCounter
-from Orders_module.order_number_counter_model import OrderNumberCounter
+from Orders_module.order_number_sequence_model import OrderNumberSequence
 
 # Import Google Meet API models to register with SQLAlchemy Base
 try:
@@ -142,23 +142,23 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
                     # Token is invalid
                     response.headers["X-Token-Status"] = "invalid"
             
-            # Determine status code category and emoji
+            # Determine status code category (avoid emojis: Windows console encoding)
             if 200 <= status_code < 300:
-                status_emoji = "✅"
+                status_tag = "OK"
                 status_category = "SUCCESS"
             elif 300 <= status_code < 400:
-                status_emoji = "⚠️"
+                status_tag = "WARN"
                 status_category = "REDIRECT"
             elif 400 <= status_code < 500:
-                status_emoji = "❌"
+                status_tag = "ERR"
                 status_category = "CLIENT_ERROR"
             else:
-                status_emoji = "💥"
+                status_tag = "ERR"
                 status_category = "SERVER_ERROR"
             
             # Log response with detailed status code information - make it more visible
             log_message = (
-                f"{status_emoji} {request.method} {request.url.path} | "
+                f"[{status_tag}] {request.method} {request.url.path} | "
                 f"Status: {status_code} ({status_category}) | "
                 f"Duration: {duration:.3f}s | "
                 f"IP: {client_ip}"
@@ -172,7 +172,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         except Exception as e:
             duration = time.time() - start_time
             error_message = (
-                f"💥 {request.method} {request.url.path} | "
+                f"[ERR] {request.method} {request.url.path} | "
                 f"Status: 500 (SERVER_ERROR) | "
                 f"Error: {str(e)} | "
                 f"Duration: {duration:.3f}s | "
@@ -539,13 +539,13 @@ async def http_exception_handler(request: Request, exc: HTTPException):
     client_ip = request.client.host if request.client else "unknown"
     user_agent = request.headers.get("user-agent", "unknown")
     
-    # Determine status category and emoji
+    # Determine status category (avoid emojis: Windows console encoding)
     if 400 <= exc.status_code < 500:
-        status_emoji = "❌"
+        status_tag = "ERR"
         status_category = "CLIENT_ERROR"
         log_level = logger.warning
     else:
-        status_emoji = "💥"
+        status_tag = "ERR"
         status_category = "SERVER_ERROR"
         log_level = logger.error
     
@@ -568,7 +568,7 @@ async def http_exception_handler(request: Request, exc: HTTPException):
     
     # Log HTTPException with details
     log_message = (
-        f"{status_emoji} {request.method} {request.url.path} | "
+        f"[{status_tag}] {request.method} {request.url.path} | "
         f"Status: {exc.status_code} ({status_category}) | "
         f"Error: {error_message} | "
         f"IP: {client_ip} | "

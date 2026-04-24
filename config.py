@@ -29,6 +29,18 @@ class Settings(BaseSettings):
     OTP_MAX_REQUESTS_PER_HOUR: int = 15  # 15 per hour
     OTP_MAX_FAILED_ATTEMPTS: int = 5  # Block after 5 failed attempts
     OTP_BLOCK_DURATION_SECONDS: int = 600  # 10 minutes block
+    RETURN_OTP_IN_RESPONSE: bool = False  # Never enable in production
+    ALLOW_OTP_BYPASS: bool = False
+    OTP_BYPASS_CODE: str = "1234"
+
+    # MSG91 Flow (optional) - for sending OTP via SMS
+    MSG91_AUTH_KEY: str = ""
+    MSG91_OTP_TEMPLATE_ID: str = ""
+    MSG91_ORDER_PLACED_TEMPLATE_ID: str = ""
+    MSG91_STATUS_ASSIGNED_TEMPLATE_ID: str = ""
+    MSG91_FLOW_URL: str = "https://control.msg91.com/api/v5/flow/"
+    MSG91_SHORT_URL: str = "1"  # "1"=On, "0"=Off
+    MSG91_REALTIME_RESPONSE: str = "1"  # "1"=wait for delivery status, "0"=no wait
     
     # Session management
     MAX_ACTIVE_SESSIONS: int = 4  # Max 4 active sessions per user

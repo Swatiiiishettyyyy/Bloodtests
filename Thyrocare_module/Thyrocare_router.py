@@ -1884,6 +1884,7 @@ async def thyrocare_webhook(
         tracking = db.query(ThyrocareOrderTracking).filter(
             ThyrocareOrderTracking.thyrocare_order_id == thyrocare_order_id
         ).first()
+        prev_tc_status = tracking.current_order_status if tracking else None
 
         phlebo = order_data.get("phlebo") or {}
         if not isinstance(phlebo, dict):
@@ -2227,6 +2228,25 @@ async def thyrocare_webhook(
                     )
 
         db.commit()
+
+        # SMS: send welcome message when Thyrocare status becomes ASSIGNED (best effort)
+        try:
+            transitioned_to_assigned = (
+                (order_status or "").strip().upper() == "ASSIGNED"
+                and (prev_tc_status or "").strip().upper() != "ASSIGNED"
+            )
+            if transitioned_to_assigned and tracking and tracking.our_order_id and settings.MSG91_STATUS_ASSIGNED_TEMPLATE_ID:
+                from Orders_module.Order_model import Order as _OrderRow
+                our_order = db.query(_OrderRow).filter(_OrderRow.id == tracking.our_order_id).first()
+                mobile = None
+                if our_order and getattr(our_order, "user", None) and getattr(our_order.user, "mobile", None):
+                    mobile = str(our_order.user.mobile).strip()
+                if mobile:
+                    from Login_module.OTP.msg91_service import send_flow
+                    send_flow("+91", mobile, settings.MSG91_STATUS_ASSIGNED_TEMPLATE_ID, variables=None)
+        except Exception as e:
+            logger.warning("Thyrocare ASSIGNED SMS hook failed (order=%s): %s", thyrocare_order_id, e)
+
         logger.info(f"Thyrocare webhook processed: order={thyrocare_order_id} status={order_status_description}")
 
     except Exception as e:

@@ -17,6 +17,7 @@ from ..Utils import security
 from ..Utils.auth_user import get_current_user
 from ..Utils.rate_limiter import get_client_ip
 from . import otp_manager
+from .msg91_service import send_otp_via_msg91_flow, Msg91SendError
 from ..User.user_session_crud import get_user_by_mobile, create_user
 from ..User.user_model import User
 from ..Device.Device_session_crud import create_device_session, deactivate_session_by_token
@@ -46,6 +47,19 @@ def send_otp(request: SendOTPRequest, http_request: Request, db: Session = Depen
     client_ip = get_client_ip(http_request)
     user_agent = http_request.headers.get("user-agent")
 
+    # Block / rate-limit checks (fail closed if Redis is down)
+    if otp_manager.is_user_blocked(request.country_code, request.mobile):
+        remaining = otp_manager.get_block_remaining_time(request.country_code, request.mobile)
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Too many failed attempts. Try again in {remaining} seconds."
+        )
+    if not otp_manager.can_request_otp(request.country_code, request.mobile):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="OTP request limit exceeded. Please try again later."
+        )
+
     # Generate OTP
     otp = otp_manager.generate_otp()
     otp_manager.store_otp(request.country_code, request.mobile, otp, expires_in=OTP_EXPIRY_SECONDS)
@@ -61,11 +75,39 @@ def send_otp(request: SendOTPRequest, http_request: Request, db: Session = Depen
         correlation_id=correlation_id
     )
 
+    # Send OTP via MSG91 Flow (if configured)
+    try:
+        send_otp_via_msg91_flow(request.country_code, request.mobile, otp)
+        OTP_crud.create_otp_audit_log(
+            db=db,
+            event_type="SENT",
+            phone_number=phone_number,
+            reason="OTP sent via MSG91 Flow",
+            ip_address=client_ip,
+            user_agent=user_agent,
+            correlation_id=correlation_id
+        )
+    except Msg91SendError as e:
+        OTP_crud.create_otp_audit_log(
+            db=db,
+            event_type="FAILED",
+            phone_number=phone_number,
+            reason=f"OTP send failed (MSG91): {str(e)[:200]}",
+            ip_address=client_ip,
+            user_agent=user_agent,
+            correlation_id=correlation_id
+        )
+        # Don't leak provider details to client
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Unable to send OTP at the moment. Please try again."
+        )
+
     message = f"OTP sent successfully to {request.mobile}."
 
     data = OTPData(
         mobile=request.mobile,
-        otp=otp,
+        otp=otp if settings.RETURN_OTP_IN_RESPONSE and settings.ENVIRONMENT != "production" else None,
         expires_in=OTP_EXPIRY_SECONDS,
         purpose=request.purpose
     )
@@ -83,8 +125,8 @@ def verify_otp(req: VerifyOTPRequest, request: Request, db: Session = Depends(ge
     user_agent = request.headers.get("user-agent")
     correlation_id = str(uuid.uuid4())
 
-    # Special bypass: "1234" always works for any phone number
-    if req.otp == "1234":
+    # Optional bypass (never allow in production unless explicitly enabled)
+    if settings.ALLOW_OTP_BYPASS and settings.ENVIRONMENT != "production" and req.otp == settings.OTP_BYPASS_CODE:
         logger.info(f"OTP bypass code used for {phone_number} from IP {client_ip}")
         # Log bypass usage for audit
         try:
@@ -362,8 +404,7 @@ def verify_otp(req: VerifyOTPRequest, request: Request, db: Session = Depends(ge
         if default_member:
             access_token_data["selected_member_id"] = str(default_member.id)
         
-        # Generate access token (15 minutes)
-        from config import settings
+        # Generate access token
         try:
             access_token = security.create_access_token(
                 access_token_data,
