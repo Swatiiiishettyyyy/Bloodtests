@@ -166,6 +166,9 @@ def can_request_otp(country_code: str, mobile: str) -> bool:
         logger.error("Cannot rate-limit OTP requests: Redis is not available")
         return False
     try:
+        client = _get_redis_client()
+        if not client or not _is_redis_available():
+            return False
         req_key = _otp_req_key(country_code, mobile)
         cnt = client.get(req_key)
         if cnt is None:
@@ -235,6 +238,9 @@ def record_failed_attempt(country_code: str, mobile: str) -> int:
         # Fail closed for security
         return OTP_MAX_FAILED_ATTEMPTS
     try:
+        client = _get_redis_client()
+        if not client or not _is_redis_available():
+            return OTP_MAX_FAILED_ATTEMPTS
         failed_key = _otp_failed_key(country_code, mobile)
         failed_count = client.get(failed_key)
         

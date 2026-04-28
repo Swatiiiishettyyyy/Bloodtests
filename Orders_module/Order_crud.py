@@ -22,6 +22,16 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Best-effort SMS via MSG91 Flow (optional)
+def _send_sms_flow_best_effort(country_code: str, mobile: str, template_id: str, variables: Optional[dict] = None) -> None:
+    if not mobile or not template_id:
+        return
+    try:
+        from Login_module.OTP.msg91_service import send_flow
+        send_flow(country_code, mobile, template_id, variables=variables)
+    except Exception as e:
+        logger.warning("MSG91 SMS send failed (template_id=%s, mobile=%s): %s", template_id, mobile, e)
+
 # Lazy import to avoid circular dependency; used for order-status notifications
 def _send_order_notification(db: Session, order: Order, title: str, message: str, type: str = "info") -> None:
     try:
@@ -1432,6 +1442,21 @@ def confirm_order_from_webhook(
     db.commit()
     db.refresh(order)
     
+    # SMS: Order placed/confirmed (best effort)
+    try:
+        mobile = None
+        if hasattr(order, "user") and order.user and getattr(order.user, "mobile", None):
+            mobile = str(order.user.mobile).strip()
+        if mobile and settings.MSG91_ORDER_PLACED_TEMPLATE_ID:
+            _send_sms_flow_best_effort(
+                country_code="+91",
+                mobile=mobile,
+                template_id=settings.MSG91_ORDER_PLACED_TEMPLATE_ID,
+                variables=None,
+            )
+    except Exception as e:
+        logger.warning("Order-confirm SMS hook failed (order=%s): %s", getattr(order, "order_number", None), e)
+
     _send_order_notification(
         db, order,
         "Order confirmed",
