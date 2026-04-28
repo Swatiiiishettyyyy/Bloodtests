@@ -3,8 +3,10 @@ from pydantic_settings import BaseSettings
 from pydantic import ConfigDict
 
 class Settings(BaseSettings):
-    DATABASE_URL: str
-    SECRET_KEY: str
+    # Dev-friendly defaults: when not provided in env/.env, backend can still boot
+    # (database.py already has its own SQLite fallback).
+    DATABASE_URL: str = ""
+    SECRET_KEY: str = "dev_secret_key_change_me"
     ALGORITHM: str = "HS256"
     
     # Token configuration - Dual Token Strategy
@@ -15,11 +17,10 @@ class Settings(BaseSettings):
     
     # Cookie configuration for web
     COOKIE_DOMAIN: str = ""
-    COOKIE_SECURE: bool 
-    # Cookie SameSite attribute: value must be provided via environment/.env
-    COOKIE_SAMESITE: str
-    # Separate SameSite setting for refresh token cookie
-    REFRESH_COOKIE_SAMESITE: str
+    COOKIE_SECURE: bool = False
+    COOKIE_SAMESITE: str = "lax"
+    # Separate SameSite setting for refresh token cookie (often same as access cookie)
+    REFRESH_COOKIE_SAMESITE: str = "lax"
     
     # CSRF protection
     CSRF_SECRET_KEY: str = ""
@@ -54,6 +55,15 @@ class Settings(BaseSettings):
     TWILIO_AUTH_TOKEN: str = ""
     TWILIO_VERIFY_SERVICE_SID: str = ""
 
+    # MSG91 (Flow API) - OTP SMS
+    MSG91_FLOW_URL: str = "https://control.msg91.com/api/v5/flow"
+    MSG91_AUTH_KEY: str = ""
+    MSG91_OTP_TEMPLATE_ID: str = ""
+
+    # MSG91 (Flow API) - transactional messages
+    MSG91_ORDER_PLACED_TEMPLATE_ID: str = ""
+    MSG91_THYROCARE_ARRIVED_TEMPLATE_ID: str = ""
+
     # Firebase FCM - path to service account JSON; empty = skip FCM send (notifications still stored in DB)
     FIREBASE_SERVICE_ACCOUNT_PATH: str = ""
     # When True (default), invalid FCM tokens are removed after failed send. When False (e.g. dev/test with dummy token), tokens are kept so notification trigger keeps running for every event.
@@ -72,6 +82,8 @@ class Settings(BaseSettings):
     INVOICE_LOGO_PATH: str = "invoice generation/logo.png"
     # Comma-separated BCC addresses for invoice emails, e.g. "a@x.com,b@x.com"
     INVOICE_BCC_EMAILS: str = ""
+    # Public S3/CDN URL for the delivery-boy GIF used in the order confirmation email
+    ORDER_CONFIRMATION_GIF_URL: str = ""
 
     # Thyrocare Configuration
     THYROCARE_BASE_URL: str = "https://api-sandbox.thyrocare.com"

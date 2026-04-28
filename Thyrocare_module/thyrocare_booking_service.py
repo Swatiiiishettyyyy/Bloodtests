@@ -273,7 +273,6 @@ def _book_group(db: Session, order: Order, items: List[OrderItem], service: Thyr
             product = db.query(ThyrocareProduct).filter(ThyrocareProduct.id == oi.thyrocare_product_id).first()
             if not product:
                 raise ValueError(f"ThyrocareProduct {oi.thyrocare_product_id} not found")
-            incentive_total += int(product.notational_incentive or 0)
             line_items.append({
                 "id": product.thyrocare_id,
                 "type": product.type,
@@ -336,7 +335,7 @@ def _book_group(db: Session, order: Order, items: List[OrderItem], service: Thyr
             "source": "Nucleotide"
         },
         "referredBy": {"doctorId": "", "doctorName": ""},
-        "paymentDetails": {"payType": "POSTPAID"},
+        "paymentDetails": {"payType": settings.THYROCARE_PAY_TYPE},
         "attributes": {
             "remarks": "",
             "campId": None,
@@ -349,7 +348,7 @@ def _book_group(db: Session, order: Order, items: List[OrderItem], service: Thyr
             "communication": {
                 "shareReport": True,
                 "shareReceipt": True,
-                "shareModes": {"whatsapp": True, "email": True}
+                "shareModes": {"whatsapp": False, "email": False}
             }
         },
         "patients": patients,
@@ -360,7 +359,7 @@ def _book_group(db: Session, order: Order, items: List[OrderItem], service: Thyr
                 "value": incentive_total
             }
         },
-        "orderOptions": {"isPdpcOrder": True}
+        "orderOptions": {"isPdpcOrder": False}
     }
 
     logger.info(

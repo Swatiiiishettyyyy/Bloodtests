@@ -16,6 +16,7 @@ class ThyrocareTestParameterOut(BaseModel):
 class ThyrocareProductOut(BaseModel):
     id: int
     thyrocare_id: str
+    product_name: Optional[str] = None
     name: str
     type: str
     no_of_tests_included: int
@@ -43,6 +44,7 @@ class ThyrocareProductOut(BaseModel):
 
 
 class ThyrocareProductUpdate(BaseModel):
+    product_name: Optional[str] = None
     about: Optional[str] = None
     short_description: Optional[str] = None
     what_this_test_checks: Optional[str] = None

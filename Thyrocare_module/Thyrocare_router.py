@@ -52,6 +52,62 @@ from .thyrocare_service import ThyrocareService
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/thyrocare", tags=["Thyrocare"])
 
+def _digits_only(s: str) -> str:
+    return "".join(ch for ch in str(s or "") if ch.isdigit())
+
+
+def _send_msg91_flow(template_id: str, mobile: str, variables: Optional[dict] = None) -> None:
+    """
+    Best-effort MSG91 Flow API send. Does not raise if not configured.
+    `mobile` can be in +91-XXXXXXXXXX or XXXXXXXXXX; it will be normalized to digits-only MSISDN.
+    """
+    auth_key = (settings.MSG91_AUTH_KEY or "").strip()
+    flow_url = (settings.MSG91_FLOW_URL or "").strip() or "https://control.msg91.com/api/v5/flow"
+    tid = (template_id or "").strip()
+
+    if not auth_key or not tid:
+        logger.warning("MSG91 Flow send skipped: missing MSG91_AUTH_KEY or template id")
+        return
+
+    msisdn = _digits_only(mobile)
+    if len(msisdn) == 10:
+        msisdn = f"91{msisdn}"
+
+    if not msisdn:
+        logger.warning("MSG91 Flow send skipped: missing mobile")
+        return
+
+    payload = {
+        "template_id": tid,
+        "short_url": "1",
+        "realTimeResponse": "1",
+        "recipients": [
+            {
+                "mobiles": msisdn,
+                **(variables or {}),
+            }
+        ],
+    }
+    headers = {
+        "accept": "application/json",
+        "authkey": auth_key,
+        "content-type": "application/json",
+    }
+
+    try:
+        resp = _requests.post(flow_url, json=payload, headers=headers, timeout=15)
+        if not resp.ok:
+            logger.error("MSG91 Flow send failed [%s]: %s", resp.status_code, resp.text[:2000])
+            return
+        try:
+            body = resp.json()
+        except Exception:
+            body = {"raw": resp.text}
+        if isinstance(body, dict) and str(body.get("type", "")).lower() not in ("success", ""):
+            logger.error("MSG91 Flow send returned non-success: %s", body)
+    except Exception as e:
+        logger.error("MSG91 Flow send error: %s", e, exc_info=True)
+
 
 def normalize_mobile(mob: str) -> str:
     """Normalize mobile number to +91-XXXXXXXXXX format for Thyrocare."""
@@ -114,6 +170,7 @@ def list_thyrocare_products(
     if search:
         q = q.filter(
             ThyrocareProduct.name.ilike(f"%{search}%") |
+            ThyrocareProduct.product_name.ilike(f"%{search}%") |
             ThyrocareProduct.category.ilike(f"%{search}%") |
             ThyrocareProduct.short_description.ilike(f"%{search}%") |
             ThyrocareProduct.about.ilike(f"%{search}%")
@@ -322,6 +379,10 @@ def search_slots(
     if not patients:
         raise HTTPException(status_code=422, detail="No members found in cart group.")
 
+    # Thyrocare slot search is pincode+date based; passing >1 patient returns empty slots.
+    # Use only the first patient for availability lookup.
+    slot_search_patients = patients[:1]
+
     service = ThyrocareService()
     results = []
     for d in dates:
@@ -329,7 +390,7 @@ def search_slots(
             result = service.get_slots(
                 pincode=pincode,
                 date=d.strftime("%Y-%m-%d"),
-                patients=patients,
+                patients=slot_search_patients,
             )
             results.append({
                 "date": d.strftime("%Y-%m-%d"),
@@ -347,7 +408,7 @@ def search_slots(
     return {
         "status": "success",
         "group_id": payload.group_id,
-        "product_name": product.name,
+        "product_name": (product.product_name or product.name),
         "is_fasting_required": product.is_fasting_required,
         "pincode": pincode,
         "members_count": len(items),
@@ -453,7 +514,7 @@ def add_blood_test_to_cart(
             "group_id": group_id,
             "cart_id": cart.id,
             "thyrocare_product_id": product.id,
-            "product_name": product.name,
+            "product_name": (product.product_name or product.name),
             "member_ids": item.member_ids,
             "address_id": item.address_id,
             "cart_item_ids": [ci.id for ci in created_items],
@@ -496,7 +557,7 @@ def get_active_cart(
         "data": {
             "group_id": first.group_id,
             "thyrocare_product_id": product_id,
-            "product_name": product.name if product else "",
+            "product_name": (product.product_name or product.name) if product else "",
             "address_id": first.address_id,
             "member_ids": [ci.member_id for ci in items],
             "appointment_date": first.appointment_date,
@@ -660,7 +721,7 @@ def upsert_blood_test_cart(
             "group_id": group_id,
             "cart_id": cart.id,
             "thyrocare_product_id": product.id,
-            "product_name": product.name,
+            "product_name": (product.product_name or product.name),
             "member_ids": item.member_ids,
             "address_id": item.address_id,
             "cart_item_ids": [ci.id for ci in created_items],
@@ -755,7 +816,7 @@ def cart_price_breakup(
     """
     gender_map = {"M": "MALE", "F": "FEMALE", "MALE": "MALE", "FEMALE": "FEMALE"}
     patients = []
-    total_incentive_value = 0
+    # Incentive pass-on is disabled (always 0) for now.
     group_summaries = []
 
     for group_id in payload.group_ids:
@@ -802,8 +863,7 @@ def cart_price_breakup(
                 ]
             })
 
-        incentive_value = int(product.notational_incentive or 0)
-        total_incentive_value += incentive_value * len(items)
+        # Incentive pass-on is disabled (always 0) for now.
         group_summaries.append({
             "group_id": group_id,
             "thyrocare_product_id": product.id,
@@ -816,7 +876,7 @@ def cart_price_breakup(
         "discounts": [{"type": "COUPON", "amount": "0"}],
         "incentivePasson": {
             "type": "FLAT",
-            "value": str(total_incentive_value) if total_incentive_value > 0 else "0"
+            "value": "0"
         },
         "isReportHardCopyRequired": payload.is_report_hard_copy_required
     }
@@ -904,6 +964,18 @@ def create_thyrocare_order(
         # This endpoint stays for backward compatibility with existing clients that explicitly call
         # /thyrocare/orders/create after payment, but it must not build a separate single-product payload.
         book_thyrocare_for_order(db, internal_order)
+
+        # Send "order placed" message (best-effort).
+        try:
+            from Login_module.Utils.phone_encryption import decrypt_phone as _dec_phone
+            raw_mob = current_user.mobile or ""
+            try:
+                user_mob = _dec_phone(raw_mob) if raw_mob else ""
+            except Exception:
+                user_mob = raw_mob
+            _send_msg91_flow(settings.MSG91_ORDER_PLACED_TEMPLATE_ID, user_mob)
+        except Exception:
+            logger.warning("Order placed message send failed (ignored).", exc_info=True)
 
         # Return Thyrocare order ids relevant to this cart group (best-effort via order snapshots).
         from Orders_module.Order_model import OrderSnapshot
@@ -1096,8 +1168,8 @@ def create_thyrocare_order(
                 "shareReport": True,
                 "shareReceipt": True,
                 "shareModes": {
-                    "whatsapp": True,
-                    "email": True
+                    "whatsapp": False,
+                    "email": False
                 }
             }
         },
@@ -1106,11 +1178,11 @@ def create_thyrocare_order(
             "discounts": [{"type": "COUPON", "code": "0"}],
             "incentivePasson": {
                 "type": "FLAT",
-                "value": int(float(payload.incentive_passon_value)) if payload.incentive_passon_value else int(product.notational_incentive or 0)
+                "value": 0
             }
         },
         "orderOptions": {
-            "isPdpcOrder": True
+            "isPdpcOrder": False
         }
     }
 
@@ -1649,6 +1721,8 @@ def _fetch_and_store_lab_results(thyrocare_order_id: str, patient_id: str) -> No
 
         order_no = (lead.findtext("LAB_CODE") or "").strip()
         lead_id = (lead.findtext("LEADID") or patient_id).strip()
+        test_name = (lead.findtext("TESTS") or "").strip() or None
+        patient_name = (lead.findtext("PATIENT") or "").strip() or None
 
         db.query(ThyrocareLabResult).filter(
             ThyrocareLabResult.thyrocare_order_id == thyrocare_order_id,
@@ -1689,6 +1763,8 @@ def _fetch_and_store_lab_results(thyrocare_order_id: str, patient_id: str) -> No
                 thyrocare_order_id=thyrocare_order_id,
                 patient_id=lead_id,
                 order_no=order_no or None,
+                test_name=test_name,
+                patient_name=patient_name,
                 test_code=test_code,
                 description=description,
                 test_value=(td.findtext("TEST_VALUE") or "").strip() or None,
@@ -2012,6 +2088,22 @@ async def thyrocare_webhook(
                 received_at=now_ist(),
             )
             db.add(history)
+
+            # If this is the first time we see ARRIVED for this order, send message (best-effort).
+            try:
+                if str(order_status or "").strip().upper() == "ARRIVED":
+                    from Login_module.Utils.phone_encryption import decrypt_phone as _dec_phone
+                    u = None
+                    if tracking.user_id:
+                        u = db.query(User).filter(User.id == tracking.user_id).first()
+                    if u and u.mobile:
+                        try:
+                            user_mob = _dec_phone(u.mobile)
+                        except Exception:
+                            user_mob = u.mobile
+                        _send_msg91_flow(settings.MSG91_THYROCARE_ARRIVED_TEMPLATE_ID, user_mob)
+            except Exception:
+                logger.warning("Thyrocare ARRIVED message send failed (ignored).", exc_info=True)
         else:
             _hist_row.raw_payload = payload
             if thyrocare_timestamp:
@@ -2019,6 +2111,50 @@ async def thyrocare_webhook(
             if b2c_patient_id:
                 _hist_row.b2c_patient_id = b2c_patient_id
             _hist_row.received_at = now_ist()
+
+        # Persist orderData.orderTracking[] lifecycle stages into status history.
+        # Thyrocare includes the full lifecycle template in every webhook; timestamps
+        # start as "" and get filled as stages complete, so always refresh on update.
+        _ot_arr = order_data.get("orderTracking") or []
+        if isinstance(_ot_arr, list):
+            for _ot_entry in _ot_arr:
+                if not isinstance(_ot_entry, dict):
+                    continue
+                _ot_status = (
+                    _webhook_nonempty_str(_ot_entry.get("statusText"))
+                    or _webhook_nonempty_str(_ot_entry.get("status"))
+                )
+                if not _ot_status:
+                    continue
+                _ot_desc = _webhook_nonempty_str(_ot_entry.get("statusDescription"))
+                _ot_ts = _webhook_nonempty_str(_ot_entry.get("timestamp"))
+
+                _ot_hist = (
+                    db.query(ThyrocareOrderStatusHistory)
+                    .filter(
+                        ThyrocareOrderStatusHistory.order_tracking_id == tracking.id,
+                        func.coalesce(ThyrocareOrderStatusHistory.order_status, "")
+                        == _hist_fingerprint_str(_ot_status),
+                    )
+                    .first()
+                )
+                if _ot_hist is None:
+                    db.add(ThyrocareOrderStatusHistory(
+                        thyrocare_order_id=thyrocare_order_id,
+                        order_tracking_id=tracking.id,
+                        order_status=_ot_status,
+                        order_status_description=_ot_desc,
+                        thyrocare_timestamp=_ot_ts,
+                        raw_payload=_ot_entry,
+                        received_at=now_ist(),
+                    ))
+                else:
+                    if _ot_ts:
+                        _ot_hist.thyrocare_timestamp = _ot_ts
+                    _ot_hist.raw_payload = _ot_entry
+                    _ot_hist.received_at = now_ist()
+
+        any_report_available = False
 
         # Upsert patients (only SP* patient IDs)
         patients = order_data.get("patients") or []
@@ -2128,6 +2264,9 @@ async def thyrocare_webhook(
         for p in patients:
             pid_raw = (p.get("id") or "").strip()
             if not pid_raw.upper().startswith("SP"):
+                _attrs = p.get("attributes") or {}
+                pid_raw = (_attrs.get("leadId") or "").strip()
+            if not pid_raw.upper().startswith("SP"):
                 continue
             pid = pid_raw.upper()
 
@@ -2155,6 +2294,9 @@ async def thyrocare_webhook(
                 report_available = existing_patient.is_report_available
             else:
                 report_available = False
+
+            if report_available:
+                any_report_available = True
 
             if not existing_patient:
                 try:
@@ -2225,6 +2367,41 @@ async def thyrocare_webhook(
                         thyrocare_order_id=thyrocare_order_id,
                         patient_id=pid,
                     )
+
+        # When any patient in this webhook has a report available, mark matching
+        # OrderItems as COMPLETED so the frontend "View report" gate is satisfied.
+        # (OrderDetailsPage.tsx:1004 checks order_status === 'COMPLETED')
+        if any_report_available and our_order_id:
+            from Orders_module.Order_model import Order as _Order, OrderStatus as _OS
+            _tc_items = (
+                db.query(OrderItem)
+                .filter(
+                    OrderItem.order_id == our_order_id,
+                    OrderItem.thyrocare_order_id == thyrocare_order_id,
+                )
+                .all()
+            )
+            for _it in _tc_items:
+                if _it.order_status != _OS.COMPLETED:
+                    _it.order_status = _OS.COMPLETED
+                    _it.status_updated_at = now_ist()
+                _it.thyrocare_booking_status = "COMPLETED"
+
+            # Promote parent Order to COMPLETED when all its blood-test items are done
+            _parent = db.query(_Order).filter(_Order.id == our_order_id).first()
+            if _parent:
+                _all_blood = (
+                    db.query(OrderItem)
+                    .filter(
+                        OrderItem.order_id == our_order_id,
+                        OrderItem.thyrocare_product_id.isnot(None),
+                    )
+                    .all()
+                )
+                if _all_blood and all(i.order_status == _OS.COMPLETED for i in _all_blood):
+                    if _parent.order_status not in (_OS.COMPLETED, _OS.CANCELLED):
+                        _parent.order_status = _OS.COMPLETED
+                        _parent.status_updated_at = now_ist()
 
         db.commit()
         logger.info(f"Thyrocare webhook processed: order={thyrocare_order_id} status={order_status_description}")
@@ -2336,11 +2513,11 @@ def get_my_lab_reports(
 
     results = query.order_by(ThyrocareLabResult.sample_date.desc()).all()
 
-    # Group by member_id for cleaner response
     from collections import defaultdict
     grouped: dict = defaultdict(list)
     for r in results:
-        grouped[r.member_id].append({
+        key = (r.member_id, r.thyrocare_order_id)
+        grouped[key].append({
             "thyrocare_order_id": r.thyrocare_order_id,
             "patient_id": r.patient_id,
             "order_no": r.order_no,
@@ -2353,14 +2530,40 @@ def get_my_lab_reports(
             "report_group": r.report_group,
             "sample_date": r.sample_date.isoformat() if r.sample_date else None,
             "category": r.category,
+            "test_name": r.test_name,
+            "patient_name": r.patient_name,
         })
+
+    # Batch-fetch product names via ThyrocareOrderTracking → ThyrocareProduct
+    from Thyrocare_module.thyrocare_webhook_model import ThyrocareOrderTracking as _TOT
+    from Thyrocare_module.Thyrocare_model import ThyrocareProduct as _TP
+
+    all_tc_ids = [tc_id for (_, tc_id) in grouped.keys() if tc_id]
+    tracking_rows = db.query(_TOT).filter(_TOT.thyrocare_order_id.in_(all_tc_ids)).all()
+    prod_id_by_tc = {t.thyrocare_order_id: t.thyrocare_product_id for t in tracking_rows if t.thyrocare_product_id}
+
+    product_ids = list(set(prod_id_by_tc.values()))
+    prod_name_by_id: dict = {}
+    if product_ids:
+        for p in db.query(_TP).filter(_TP.id.in_(product_ids)).all():
+            prod_name_by_id[p.id] = p.product_name or p.name or ""
+
+    tc_to_product_name = {
+        tc_id: prod_name_by_id.get(prod_id, "")
+        for tc_id, prod_id in prod_id_by_tc.items()
+    }
 
     return {
         "status": "success",
-        "total": len(results),
+        "total": len(grouped),
         "data": [
-            {"member_id": mid, "results": items}
-            for mid, items in grouped.items()
+            {
+                "member_id": mid,
+                "thyrocare_order_id": tc_id,
+                "product_name": tc_to_product_name.get(tc_id) or "",
+                "results": items,
+            }
+            for (mid, tc_id), items in grouped.items()
         ],
     }
 

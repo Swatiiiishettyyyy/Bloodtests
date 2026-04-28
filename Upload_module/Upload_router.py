@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import func
+import hashlib
 
 from deps import get_db
 from Login_module.Utils.auth_user import get_current_user
@@ -103,22 +104,65 @@ async def upload_report(
     if ext not in (".pdf", ".png", ".jpg", ".jpeg"):
         raise HTTPException(status_code=415, detail="Only PDF, PNG, JPG files are supported.")
 
+    # Stream to disk (avoid loading in memory) + compute sha256 to dedupe retries.
+    sha = hashlib.sha256()
     key = f"{uuid.uuid4().hex}{ext}"
     dest = UPLOAD_ROOT / key
-
-    # Stream to disk (avoid loading in memory)
     try:
         with dest.open("wb") as f:
             while True:
                 chunk = await file.read(1024 * 1024)
                 if not chunk:
                     break
+                sha.update(chunk)
                 f.write(chunk)
     finally:
         try:
             await file.close()
         except Exception:
             pass
+    file_hash = sha.hexdigest()
+
+    # If the exact same file was already uploaded for this user/member, return the existing row.
+    existing = (
+        db.query(UploadedReport)
+        .filter(
+            UploadedReport.user_id == current_user.id,
+            UploadedReport.member_id == member_id,
+            UploadedReport.file_hash == file_hash,
+        )
+        .order_by(UploadedReport.created_at.desc())
+        .first()
+    )
+    if existing:
+        # Clean up the newly written duplicate file.
+        try:
+            dest.unlink(missing_ok=True)  # py>=3.8 supports missing_ok
+        except Exception:
+            pass
+        row = existing
+        # Build results count from extracted rows (best effort).
+        extracted_count = (
+            db.query(UploadedLabResult)
+            .filter(
+                UploadedLabResult.uploaded_report_id == row.id,
+                UploadedLabResult.user_id == current_user.id,
+            )
+            .count()
+        )
+        return {
+            "status": "success",
+            "data": {
+                "id": row.id,
+                "member_id": row.member_id,
+                "report_name": row.file_name,
+                "lab_name": row.lab_name,
+                "report_date": row.created_at.isoformat() if row.created_at else None,
+                "source": "uploaded",
+                "download_url": f"/upload/reports/{row.id}/download",
+                "results_count": extracted_count,
+            },
+        }
 
     row = UploadedReport(
         user_id=current_user.id,
@@ -126,6 +170,7 @@ async def upload_report(
         file_name=orig,
         content_type=file.content_type,
         file_path=str(dest),
+        file_hash=file_hash,
         lab_name=(lab_name or "").strip() or None,
         created_at=now_ist(),
     )

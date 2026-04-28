@@ -2,7 +2,7 @@ from sqlalchemy.orm import Session
 
 from .order_number_sequence_model import OrderNumberSequence
 
-ORDER_NUMBER_BASE = 2627001000
+ORDER_NUMBER_BASE = 2627001004
 
 
 def generate_order_number(db: Session) -> str:

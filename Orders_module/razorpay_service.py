@@ -19,14 +19,17 @@ RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID")
 RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET")
 RAZORPAY_WEBHOOK_SECRET = os.getenv("RAZORPAY_WEBHOOK_SECRET")
 
-if not RAZORPAY_KEY_ID or not RAZORPAY_KEY_SECRET:
-    raise ValueError("RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET must be set in .env file")
+_RAZORPAY_ENABLED = bool(RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET)
+if not _RAZORPAY_ENABLED:
+    # Dev-friendly: allow backend to boot without Razorpay configured.
+    # Razorpay-dependent endpoints will fail with a clear 503 instead of crashing on import.
+    logger.warning("RAZORPAY_KEY_ID/RAZORPAY_KEY_SECRET not set. Razorpay features disabled.")
 
 if not RAZORPAY_WEBHOOK_SECRET:
     logger.warning("RAZORPAY_WEBHOOK_SECRET not set. Webhook signature verification will fail.")
 
 # Initialize Razorpay client
-razorpay_client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
+razorpay_client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET)) if _RAZORPAY_ENABLED else None
 
 # Set API version (optional)
 # razorpay_client.set_app_details({"title": "Nucleotide", "version": "1.0.0"})
@@ -45,6 +48,8 @@ def create_razorpay_order(amount: float, currency: str = "INR", receipt: Optiona
     Returns:
         Razorpay order object
     """
+    if not _RAZORPAY_ENABLED or razorpay_client is None:
+        raise ConnectionError("Razorpay is not configured on this server (missing RAZORPAY_KEY_ID/RAZORPAY_KEY_SECRET).")
     try:
         # Convert rupees to paise (multiply by 100)
         amount_in_paise = int(amount * 100)
@@ -104,6 +109,9 @@ def verify_payment_signature(razorpay_order_id: str, razorpay_payment_id: str, r
     Returns:
         True if signature is valid, False otherwise
     """
+    if not _RAZORPAY_ENABLED or not RAZORPAY_KEY_SECRET:
+        logger.error("Razorpay is not configured; cannot verify payment signature.")
+        return False
     try:
         # Create message to verify
         message = f"{razorpay_order_id}|{razorpay_payment_id}"
@@ -140,6 +148,9 @@ def get_payment_details(payment_id: str) -> Optional[Dict[str, Any]]:
     Returns:
         Payment details or None if not found
     """
+    if not _RAZORPAY_ENABLED or razorpay_client is None:
+        logger.error("Razorpay is not configured; cannot fetch payment details.")
+        return None
     try:
         payment = razorpay_client.payment.fetch(payment_id)
         return payment
@@ -161,6 +172,9 @@ def get_order_details(razorpay_order_id: str) -> Optional[Dict[str, Any]]:
     Returns:
         Order details or None if not found
     """
+    if not _RAZORPAY_ENABLED or razorpay_client is None:
+        logger.error("Razorpay is not configured; cannot fetch order details.")
+        return None
     try:
         order = razorpay_client.order.fetch(razorpay_order_id)
         return order
@@ -193,6 +207,8 @@ def create_razorpay_customer(
     if not data:
         raise ValueError("Cannot create Razorpay customer without any of name, email, or contact")
 
+    if not _RAZORPAY_ENABLED or razorpay_client is None:
+        raise ConnectionError("Razorpay is not configured on this server (missing RAZORPAY_KEY_ID/RAZORPAY_KEY_SECRET).")
     try:
         customer = razorpay_client.customer.create(data=data)
         logger.info(f"Razorpay customer created: {customer.get('id')}")
@@ -239,6 +255,8 @@ def create_razorpay_invoice_for_order(
     This uses the public Razorpay example for creating an invoice with customer_id:
     https://www.postman.com/razorpaydev/razorpay-public-workspace/request/llu74wr/create-an-invoice-with-customer-id?tab=body
     """
+    if not _RAZORPAY_ENABLED or razorpay_client is None:
+        raise ConnectionError("Razorpay is not configured on this server (missing RAZORPAY_KEY_ID/RAZORPAY_KEY_SECRET).")
     try:
         import time as _time
         amount_in_paise = int(total_amount * 100)

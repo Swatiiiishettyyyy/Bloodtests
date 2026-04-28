@@ -49,6 +49,12 @@ class ThyrocareService:
             "password": settings.THYROCARE_PASSWORD,
         }
         try:
+            if not (settings.THYROCARE_USERNAME and settings.THYROCARE_PASSWORD and settings.THYROCARE_PARTNER_ID):
+                logger.error(
+                    "Thyrocare login skipped: missing credentials/partner id. "
+                    "Set THYROCARE_USERNAME, THYROCARE_PASSWORD, THYROCARE_PARTNER_ID in Bloodtests/.env"
+                )
+                return False
             logger.info(f"Attempting Thyrocare login for user: {settings.THYROCARE_USERNAME}")
             response = requests.post(
                 url, json=payload, headers=self._get_headers(include_auth=False)
@@ -75,8 +81,19 @@ class ThyrocareService:
             logger.info("Thyrocare login successful. Token acquired.")
             return True
         except Exception as e:
+            body = ""
+            status_code = None
+            try:
+                if isinstance(e, requests.HTTPError) and e.response is not None:
+                    status_code = e.response.status_code
+                    body = e.response.text or ""
+            except Exception:
+                pass
             print(f"[THYROCARE AUTH] Login FAILED: {str(e)}")
-            logger.error(f"Thyrocare login failed: {str(e)}")
+            if body:
+                logger.error("Thyrocare login failed [%s]: %s", status_code or "?", body[:2000])
+            else:
+                logger.error(f"Thyrocare login failed: {str(e)}")
             self._token = None
             self._token_expiry = 0
             return False

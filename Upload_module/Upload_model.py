@@ -17,9 +17,19 @@ class UploadedReport(Base):
     file_name = Column(String(300), nullable=False)
     content_type = Column(String(100), nullable=True)
     file_path = Column(String(700), nullable=False)  # server-local path or object key
+    file_hash = Column(String(64), nullable=True, index=True)  # sha256 hex; used to dedupe retries
     lab_name = Column(String(200), nullable=True)
 
     created_at = Column(DateTime(timezone=True), default=now_ist, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "member_id",
+            "file_hash",
+            name="uq_uploaded_reports_user_member_hash",
+        ),
+    )
 
 
 class UploadedLabResult(Base):

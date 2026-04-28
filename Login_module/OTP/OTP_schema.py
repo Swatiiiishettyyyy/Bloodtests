@@ -25,7 +25,7 @@ class SendOTPRequest(BaseModel):
 class VerifyOTPRequest(BaseModel):
     country_code: str = Field(..., example="+91", min_length=1, max_length=5)
     mobile: str = Field(..., example="9876543210", min_length=10, max_length=15)
-    otp: str = Field(..., example="123456", min_length=4, max_length=8)
+    otp: str = Field(..., example="1234", min_length=4, max_length=4)
     device_id: str = Field(..., example="device-uuid-or-imei", min_length=1, max_length=255)
     device_platform: str = Field(..., example="web", max_length=50)  # web/mobile/ios/android
     device_details: str = Field(..., example='{"browser":"Chrome", "version":"..."}', max_length=1000)
@@ -48,8 +48,8 @@ class VerifyOTPRequest(BaseModel):
     
     @validator('otp')
     def validate_otp(cls, v):
-        if not re.match(r'^\d{4,8}$', v):
-            raise ValueError('OTP must be 4-8 digits')
+        if not re.match(r'^\d{4}$', v):
+            raise ValueError('OTP must be exactly 4 digits')
         return v
     
     @validator('device_id')
@@ -69,7 +69,6 @@ class VerifyOTPRequest(BaseModel):
 # Response schemas
 class OTPData(BaseModel):
     mobile: str
-    otp: str
     expires_in: int
     purpose: Optional[str]
 

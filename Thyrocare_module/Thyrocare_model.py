@@ -14,6 +14,9 @@ class ThyrocareProduct(Base):
     id = Column(Integer, primary_key=True, index=True)
     thyrocare_id = Column(String(50), unique=True, nullable=False, index=True)  # e.g. "P1524"
     name = Column(String(300), nullable=False, index=True)
+    # Some DBs / sync jobs also populate `product_name` (preferred display label).
+    # Keep `name` for backward compatibility with existing code and older rows.
+    product_name = Column(String(300), nullable=True, index=True)
     type = Column(String(50), nullable=False)  # e.g. "SSKU"
     no_of_tests_included = Column(Integer, nullable=False, default=0)
 

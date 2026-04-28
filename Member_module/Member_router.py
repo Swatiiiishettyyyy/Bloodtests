@@ -172,7 +172,25 @@ def save_member_api(
         Member.is_deleted == False
     ).count()
     is_first_member = existing_member_count == 0
-    
+
+    # Send welcome email when the first Self profile is saved
+    if is_first_member and member.is_self_profile and member.email:
+        try:
+            import sys as _sys
+            _inv_gen = str(Path(__file__).parent.parent / "invoice generation")
+            if _inv_gen not in _sys.path:
+                _sys.path.append(_inv_gen)
+            from welcome_email import send_welcome_email
+            send_welcome_email(
+                to=member.email,
+                name=member.name or "there",
+                service_account_file=str(Path(__file__).parent.parent / settings.INVOICE_SERVICE_ACCOUNT_PATH),
+                sender_email=settings.INVOICE_SENDER_EMAIL,
+            )
+            logger.info(f"Welcome email sent to {member.email} for new member ID {member.id} (user {user.id})")
+        except Exception as e:
+            logger.error(f"Welcome email failed for member {member.id} (user {user.id}): {e}", exc_info=True)
+
     message = "Member saved successfully."
     if family_status:
         mandatory_remaining = family_status.get("mandatory_slots_remaining", 0)
@@ -458,6 +476,7 @@ def get_member_list(
             "mobile": decrypted_mobile,
             "email": m.email,
             "profile_photo_url": m.profile_photo_url,
+            "is_self_profile": m.is_self_profile,
             "has_taken_genetic_test": fields["has_taken_genetic_test"],
             "api_key": getattr(m, "api_key", None),
             "latest_order_no": fields["latest_order_no"],

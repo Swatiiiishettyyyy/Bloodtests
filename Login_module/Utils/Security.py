@@ -1,3 +1,14 @@
+"""
+Compatibility shim.
+
+Some modules import `Login_module.Utils.security` (lowercase), but the implementation
+is in `Security.py` (capital S). On case-sensitive environments this breaks.
+
+Export the public API from `Security.py` under the expected lowercase module name.
+"""
+
+from .Security import *  # noqa: F401,F403
+
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, Tuple
 import jwt

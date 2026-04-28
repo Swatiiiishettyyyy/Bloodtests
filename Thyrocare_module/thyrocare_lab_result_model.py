@@ -17,6 +17,8 @@ class ThyrocareLabResult(Base):
     thyrocare_order_id = Column(String(50), nullable=False, index=True)   # e.g. VL06D615
     patient_id = Column(String(50), nullable=False, index=True)           # <LEADID> e.g. SP84255997
     order_no = Column(String(100), nullable=True)                         # <LAB_CODE> e.g. 2502096324/IT001
+    test_name = Column(String(500), nullable=True)                        # <TESTS> e.g. "HEMOGRAM - 6 PART (DIFF)"
+    patient_name = Column(String(200), nullable=True)                     # <PATIENT> e.g. "PatientONE (30Y/M)"
 
     # Test result fields
     test_code = Column(String(100), nullable=True)                        # <TEST_CODE>

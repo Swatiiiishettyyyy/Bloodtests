@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from typing import Optional
 import logging
 import uuid
+import requests
 from .OTP_schema import (
     SendOTPRequest,
     SendOTPResponse,
@@ -35,6 +36,55 @@ MAX_ACTIVE_SESSIONS = settings.MAX_ACTIVE_SESSIONS
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
+def _digits_only(s: str) -> str:
+    return "".join(ch for ch in str(s or "") if ch.isdigit())
+
+
+def _send_otp_via_msg91(country_code: str, mobile: str, otp: str) -> None:
+    """
+    Send OTP through MSG91 Flow API.
+    Template must include variable named `OTP` (and optionally any others).
+    """
+    auth_key = (settings.MSG91_AUTH_KEY or "").strip()
+    template_id = (settings.MSG91_OTP_TEMPLATE_ID or "").strip()
+    url = (settings.MSG91_FLOW_URL or "").strip() or "https://control.msg91.com/api/v5/flow"
+
+    if not auth_key or not template_id:
+        raise RuntimeError("MSG91 is not configured (missing MSG91_AUTH_KEY / MSG91_OTP_TEMPLATE_ID).")
+
+    # MSG91 expects digits only, typically including country code without '+'
+    cc = _digits_only(country_code) or "91"
+    msisdn = f"{cc}{_digits_only(mobile)}"
+
+    payload = {
+        "template_id": template_id,
+        "short_url": "1",
+        "short_url_expiry": "3600",
+        "realTimeResponse": "1",
+        "recipients": [
+            {
+                "mobiles": msisdn,
+                "OTP": otp,
+            }
+        ],
+    }
+    headers = {
+        "accept": "application/json",
+        "authkey": auth_key,
+        "content-type": "application/json",
+    }
+
+    resp = requests.post(url, json=payload, headers=headers, timeout=15)
+    # MSG91 typically returns 200 with {message: "...", type: "success"}; include body in error logs.
+    if not resp.ok:
+        raise RuntimeError(f"MSG91 send failed ({resp.status_code}): {resp.text}")
+    try:
+        body = resp.json()
+    except Exception:
+        body = {"raw": resp.text}
+    if isinstance(body, dict) and str(body.get("type", "")).lower() not in ("success", ""):
+        raise RuntimeError(f"MSG91 send failed: {body}")
+
 
 @router.post("/send-otp", response_model=SendOTPResponse)
 def send_otp(request: SendOTPRequest, http_request: Request, db: Session = Depends(get_db)):
@@ -46,9 +96,27 @@ def send_otp(request: SendOTPRequest, http_request: Request, db: Session = Depen
     client_ip = get_client_ip(http_request)
     user_agent = http_request.headers.get("user-agent")
 
-    # Generate OTP
-    otp = otp_manager.generate_otp()
+    # Generate OTP (4 digits)
+    otp = otp_manager.generate_otp(length=4)
+
+    # # ── SMS DISABLED — using fixed OTP "1234" for development ──────────────
+    # # To re-enable: remove the next line and uncomment the MSG91 block below.
+    # otp = "1234"
+    # # ───────────────────────────────────────────────────────────────────────
+
+    # Store OTP in Redis first (so verify can succeed even if SMS provider is slow).
     otp_manager.store_otp(request.country_code, request.mobile, otp, expires_in=OTP_EXPIRY_SECONDS)
+
+    # Send OTP via MSG91 Flow API
+    try:
+        _send_otp_via_msg91(request.country_code, request.mobile, otp)
+    except Exception as e:
+        # Keep OTP stored for a short window, but inform the client the SMS failed.
+        logger.error(f"MSG91 OTP send failed: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="OTP service is temporarily unavailable. Please try again.",
+        )
 
     # Create audit log (no OTP values stored)
     OTP_crud.create_otp_audit_log(
@@ -65,7 +133,6 @@ def send_otp(request: SendOTPRequest, http_request: Request, db: Session = Depen
 
     data = OTPData(
         mobile=request.mobile,
-        otp=otp,
         expires_in=OTP_EXPIRY_SECONDS,
         purpose=request.purpose
     )
@@ -83,74 +150,53 @@ def verify_otp(req: VerifyOTPRequest, request: Request, db: Session = Depends(ge
     user_agent = request.headers.get("user-agent")
     correlation_id = str(uuid.uuid4())
 
-    # Special bypass: "1234" always works for any phone number
-    if req.otp == "1234":
-        logger.info(f"OTP bypass code used for {phone_number} from IP {client_ip}")
-        # Log bypass usage for audit
-        try:
-            OTP_crud.create_otp_audit_log(
-                db=db,
-                event_type="VERIFIED",
-                phone_number=phone_number,
-                device_id=req.device_id,
-                reason=f"OTP bypass code used. IP: {client_ip}",
-                ip_address=client_ip,
-                user_agent=user_agent,
-                correlation_id=correlation_id
-            )
-        except Exception as e:
-            logger.warning(f"Failed to create bypass audit log: {e}")
-        # Continue with successful verification flow below
-    else:
-        # Normal OTP verification flow
-        # Fetch OTP from Redis (plaintext)
-        stored = otp_manager.get_otp(req.country_code, req.mobile)
-        if not stored:
-            logger.warning(
-                f"OTP verification failed - OTP expired or not found | "
-                f"Phone: {phone_number} | Device: {req.device_id} | IP: {client_ip}"
-            )
-            OTP_crud.create_otp_audit_log(
-                db=db,
-                event_type="FAILED",
-                phone_number=phone_number,
-                device_id=req.device_id,
-                reason="OTP expired or not found",
-                ip_address=client_ip,
-                user_agent=user_agent,
-                correlation_id=correlation_id
-            )
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="The OTP code has expired. Please request a new one."
-            )
+    # Normal OTP verification flow (4-digit only)
+    stored = otp_manager.get_otp(req.country_code, req.mobile)
+    if not stored:
+        logger.warning(
+            f"OTP verification failed - OTP expired or not found | "
+            f"Phone: {phone_number} | Device: {req.device_id} | IP: {client_ip}"
+        )
+        OTP_crud.create_otp_audit_log(
+            db=db,
+            event_type="FAILED",
+            phone_number=phone_number,
+            device_id=req.device_id,
+            reason="OTP expired or not found",
+            ip_address=client_ip,
+            user_agent=user_agent,
+            correlation_id=correlation_id
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="The OTP code has expired. Please request a new one."
+        )
 
-        # Compare plaintext (fast check)
-        if stored != req.otp:
-            logger.warning(
-                f"OTP verification failed - Invalid OTP | "
-                f"Phone: {phone_number} | Device: {req.device_id} | IP: {client_ip} | "
-                f"Attempted OTP: {req.otp[:2]}** (masked)"
-            )
-            
-            OTP_crud.create_otp_audit_log(
-                db=db,
-                event_type="FAILED",
-                phone_number=phone_number,
-                device_id=req.device_id,
-                reason=f"Invalid OTP. IP: {client_ip}",
-                ip_address=client_ip,
-                user_agent=user_agent,
-                correlation_id=correlation_id
-            )
-            
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="The OTP code you entered is incorrect. Please try again."
-            )
-        
-        # Remove OTP from Redis after successful verification (only for normal flow)
-        otp_manager.delete_otp(req.country_code, req.mobile)
+    if stored != req.otp:
+        logger.warning(
+            f"OTP verification failed - Invalid OTP | "
+            f"Phone: {phone_number} | Device: {req.device_id} | IP: {client_ip} | "
+            f"Attempted OTP: {req.otp[:2]}** (masked)"
+        )
+
+        OTP_crud.create_otp_audit_log(
+            db=db,
+            event_type="FAILED",
+            phone_number=phone_number,
+            device_id=req.device_id,
+            reason=f"Invalid OTP. IP: {client_ip}",
+            ip_address=client_ip,
+            user_agent=user_agent,
+            correlation_id=correlation_id
+        )
+
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="The OTP code you entered is incorrect. Please try again."
+        )
+
+    # Consume OTP after successful verification
+    otp_manager.delete_otp(req.country_code, req.mobile)
 
     # OTP verified successfully (both normal and bypass)
     try:

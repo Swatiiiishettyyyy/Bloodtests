@@ -45,6 +45,7 @@ from Notification_module.Notification_crud import send_notification_to_user
 from config import settings
 from .order_number_service import ORDER_NUMBER_BASE
 import razorpay
+import requests as _requests
 
 # Admin password for PUT order status endpoint — set ORDER_STATUS_PASSWORD env var in production
 ORDER_STATUS_PASSWORD = settings.ORDER_STATUS_PASSWORD
@@ -63,6 +64,58 @@ def verify_order_status_password(
         )
 
 logger = logging.getLogger(__name__)
+
+def _digits_only(s: str) -> str:
+    return "".join(ch for ch in str(s or "") if ch.isdigit())
+
+
+def _send_msg91_flow(template_id: str, mobile: str, variables: Optional[dict] = None) -> None:
+    """
+    Best-effort MSG91 Flow API send. Does not raise if not configured.
+    """
+    auth_key = (settings.MSG91_AUTH_KEY or "").strip()
+    flow_url = (settings.MSG91_FLOW_URL or "").strip() or "https://control.msg91.com/api/v5/flow"
+    tid = (template_id or "").strip()
+
+    if not auth_key or not tid:
+        return
+
+    msisdn = _digits_only(mobile)
+    if len(msisdn) == 10:
+        msisdn = f"91{msisdn}"
+    if not msisdn:
+        return
+
+    payload = {
+        "template_id": tid,
+        "short_url": "1",
+        "realTimeResponse": "1",
+        "recipients": [
+            {
+                "mobiles": msisdn,
+                **(variables or {}),
+            }
+        ],
+    }
+    headers = {
+        "accept": "application/json",
+        "authkey": auth_key,
+        "content-type": "application/json",
+    }
+
+    try:
+        resp = _requests.post(flow_url, json=payload, headers=headers, timeout=15)
+        if not resp.ok:
+            logger.error("MSG91 Flow send failed [%s]: %s", resp.status_code, resp.text[:2000])
+            return
+        try:
+            body = resp.json()
+        except Exception:
+            body = {"raw": resp.text}
+        if isinstance(body, dict) and str(body.get("type", "")).lower() not in ("success", ""):
+            logger.error("MSG91 Flow send returned non-success: %s", body)
+    except Exception as e:
+        logger.error("MSG91 Flow send error: %s", e, exc_info=True)
 
 @router.post("/internal/order-number/reset")
 def reset_order_number_sequence(
@@ -681,6 +734,19 @@ def verify_payment(
                 f"Order {order.order_number} created post-payment for user {current_user.id} "
                 f"(PendingCheckout {pending.id})"
             )
+
+            # Send "order placed" message (best-effort). This runs only on first create for this PendingCheckout.
+            try:
+                from Login_module.Utils.phone_encryption import decrypt_phone as _dec_phone
+                raw_mob = current_user.mobile or ""
+                try:
+                    user_mob = _dec_phone(raw_mob) if raw_mob else ""
+                except Exception:
+                    user_mob = raw_mob
+                _send_msg91_flow(settings.MSG91_ORDER_PLACED_TEMPLATE_ID, user_mob)
+            except Exception:
+                logger.warning("Order placed message send failed (ignored).", exc_info=True)
+
             return PaymentVerificationResponse(
                 status="success",
                 message="Payment verified successfully. Order confirmed.",

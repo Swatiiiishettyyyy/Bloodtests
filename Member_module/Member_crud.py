@@ -202,9 +202,7 @@ def save_member(
         if existing:
             raise HTTPException(
                 status_code=422,
-                detail=(
-                    f"'{req.name}' with relation '{req.relation}' already exists in the '{category_name}' category. This member is already there."
-                )
+                detail="This member already exists."
             )
         
         # Check if deleted member with same name AND relation exists in same category

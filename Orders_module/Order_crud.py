@@ -1387,6 +1387,48 @@ def confirm_order_from_webhook(
             exc_info=True
         )
 
+    # ── ORDER CONFIRMATION HTML EMAIL ──────────────────────────────────────
+    try:
+        import sys as _sys
+        from pathlib import Path as _Path
+
+        _project_root = _Path(__file__).parent.parent
+        _inv_gen = str(_project_root / "invoice generation")
+        if _inv_gen not in _sys.path:
+            _sys.path.append(_inv_gen)
+
+        from order_confirmation_email import send_order_confirmation_email
+
+        # Build product names from order items (mirrors invoice_items logic above)
+        _conf_groups: dict = {}
+        for _item in order.items:
+            _item_name = "Genetic Test Product"
+            if _item.snapshot and _item.snapshot.product_data:
+                _item_name = _item.snapshot.product_data.get("Name", _item_name)
+            elif _item.product:
+                _item_name = _item.product.Name
+            _gkey = None
+            if _item.snapshot and _item.snapshot.cart_item_data:
+                _gkey = _item.snapshot.cart_item_data.get("group_id")
+            _gkey = _gkey or str(_item.id)
+            _conf_groups.setdefault(_gkey, {"name": _item_name})
+        _conf_items = list(_conf_groups.values())
+
+        send_order_confirmation_email(
+            to=order.user.email,
+            customer_name=(order.user.name if order.user else None) or "Valued Customer",
+            items=_conf_items,
+            service_account_file=str(_project_root / settings.INVOICE_SERVICE_ACCOUNT_PATH),
+            sender_email=settings.INVOICE_SENDER_EMAIL,
+            gif_url=settings.ORDER_CONFIRMATION_GIF_URL,
+        )
+        logger.info(f"Order confirmation HTML email sent to {order.user.email} for order {order.order_number}")
+    except Exception as e:
+        logger.error(
+            f"Error sending order confirmation email for order {order.order_number}: {str(e)}",
+            exc_info=True
+        )
+
     db.commit()
     db.refresh(order)
     

@@ -160,16 +160,21 @@ def can_request_otp(country_code: str, mobile: str) -> bool:
     Rate limiting per-hour by storing a counter that expires in 3600 seconds.
     For security operations, we fail closed if Redis is down.
     """
+    client = _get_redis_client()
+    if not client or not _is_redis_available():
+        # Fail closed for security - deny if Redis is down
+        logger.error("Cannot rate-limit OTP requests: Redis is not available")
+        return False
     try:
         req_key = _otp_req_key(country_code, mobile)
-        cnt = _redis_client.get(req_key)
+        cnt = client.get(req_key)
         if cnt is None:
             # seed counter with expiry 3600
-            _redis_client.set(req_key, 1, ex=3600)
+            client.set(req_key, 1, ex=3600)
             return True
         if int(cnt) >= OTP_MAX_REQUESTS_PER_HOUR:
             return False
-        _redis_client.incr(req_key)
+        client.incr(req_key)
         return True
     except redis.RedisError as e:
         logger.error(f"Redis error checking OTP request limit: {e}")
@@ -179,8 +184,11 @@ def can_request_otp(country_code: str, mobile: str) -> bool:
 
 def get_remaining_requests(country_code: str, mobile: str) -> int:
     try:
+        client = _get_redis_client()
+        if not client or not _is_redis_available():
+            return 0
         req_key = _otp_req_key(country_code, mobile)
-        cnt = _redis_client.get(req_key)
+        cnt = client.get(req_key)
         if cnt is None:
             return OTP_MAX_REQUESTS_PER_HOUR
         return max(0, OTP_MAX_REQUESTS_PER_HOUR - int(cnt))
@@ -192,8 +200,11 @@ def get_remaining_requests(country_code: str, mobile: str) -> int:
 def is_user_blocked(country_code: str, mobile: str) -> bool:
     """Check if user is blocked due to too many failed attempts"""
     try:
+        client = _get_redis_client()
+        if not client or not _is_redis_available():
+            return False
         block_key = _otp_blocked_key(country_code, mobile)
-        blocked = _redis_client.get(block_key)
+        blocked = client.get(block_key)
         return blocked is not None
     except redis.RedisError as e:
         logger.error(f"Redis error checking user block status: {e}")
@@ -203,8 +214,11 @@ def is_user_blocked(country_code: str, mobile: str) -> bool:
 def get_block_remaining_time(country_code: str, mobile: str) -> int:
     """Get remaining block time in seconds, or 0 if not blocked"""
     try:
+        client = _get_redis_client()
+        if not client or not _is_redis_available():
+            return 0
         block_key = _otp_blocked_key(country_code, mobile)
-        ttl = _redis_client.ttl(block_key)
+        ttl = client.ttl(block_key)
         return max(0, ttl) if ttl > 0 else 0
     except redis.RedisError as e:
         logger.error(f"Redis error getting block remaining time: {e}")
@@ -216,24 +230,28 @@ def record_failed_attempt(country_code: str, mobile: str) -> int:
     Record a failed OTP attempt and return current failed count.
     If threshold reached, block the user.
     """
+    client = _get_redis_client()
+    if not client or not _is_redis_available():
+        # Fail closed for security
+        return OTP_MAX_FAILED_ATTEMPTS
     try:
         failed_key = _otp_failed_key(country_code, mobile)
-        failed_count = _redis_client.get(failed_key)
+        failed_count = client.get(failed_key)
         
         if failed_count is None:
             # First failed attempt, set with 1 hour expiry
-            _redis_client.set(failed_key, 1, ex=3600)
+            client.set(failed_key, 1, ex=3600)
             failed_count = 1
         else:
             failed_count = int(failed_count) + 1
-            _redis_client.set(failed_key, failed_count, ex=3600)
+            client.set(failed_key, failed_count, ex=3600)
         
         # Block user if threshold reached
         if failed_count >= OTP_MAX_FAILED_ATTEMPTS:
             block_key = _otp_blocked_key(country_code, mobile)
-            _redis_client.set(block_key, True, ex=OTP_BLOCK_DURATION_SECONDS)
+            client.set(block_key, True, ex=OTP_BLOCK_DURATION_SECONDS)
             # Reset failed count after blocking
-            _redis_client.delete(failed_key)
+            client.delete(failed_key)
         
         return failed_count
     except redis.RedisError as e:
@@ -245,7 +263,10 @@ def record_failed_attempt(country_code: str, mobile: str) -> int:
 def reset_failed_attempts(country_code: str, mobile: str):
     """Reset failed attempts counter (called on successful verification)"""
     try:
+        client = _get_redis_client()
+        if not client or not _is_redis_available():
+            return
         failed_key = _otp_failed_key(country_code, mobile)
-        _redis_client.delete(failed_key)
+        client.delete(failed_key)
     except redis.RedisError as e:
         logger.error(f"Redis error resetting failed attempts: {e}")

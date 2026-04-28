@@ -9,7 +9,7 @@ import uuid
 import logging
 
 from Login_module.Utils.datetime_utils import now_ist
-from Login_module.Utils import security
+from Login_module.Utils import Security as security
 from .Refresh_token_model import RefreshToken
 from Login_module.Device.Device_session_model import DeviceSession
 from Login_module.Device.Device_session_audit_crud import create_session_audit_log

@@ -31,7 +31,7 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
 # Import the invoice generator from your existing script
-from nucleotide_invoice import generate_invoice as _generate_invoice_to_file
+from nucleotide_invoice import generate_invoice as _generate_invoice_to_file, fmt_currency
 
 # We also need the internals to build a BytesIO version
 from reportlab.lib.pagesizes import A4
@@ -167,45 +167,36 @@ def build_email_body(invoice_data: dict) -> tuple[str, str]:
 
     Returns (plain_body, html_body).
     """
-    customer_name   = invoice_data.get("customer_name", "Valued Customer")
-    company_name    = invoice_data.get("company_name", "Nucleotide Healthcare Pvt Ltd")
+    customer_name       = invoice_data.get("customer_name", "Valued Customer")
+    company_name        = invoice_data.get("company_name", "Nucleotide Healthcare Pvt Ltd")
     customer_care_email = invoice_data.get("customer_care_email", "info@nucleotide.life")
-    website         = invoice_data.get("website", "www.nucleotide.life")
-    items           = invoice_data.get("items", [])
+    website             = invoice_data.get("website", "www.nucleotide.life")
+    order_number        = invoice_data.get("order_number", "")
+    paid_amount         = invoice_data.get("paid_amount", invoice_data.get("grand_total", 0))
+    items               = invoice_data.get("items", [])
 
-    # Build inline item list: "A, B, ... & N"
-    names = [item.get("name", "") for item in items if item.get("name")]
-    if len(names) == 0:
-        item_list_plain = "your selected product(s)"
-        item_list_html  = "your selected product(s)"
-    elif len(names) == 1:
-        item_list_plain = f"**{names[0]}**"
-        item_list_html  = f"<strong>{names[0]}</strong>"
-    elif len(names) == 2:
-        item_list_plain = f"**{names[0]} & {names[1]}**"
-        item_list_html  = f"<strong>{names[0]} &amp; {names[1]}</strong>"
-    else:
-        all_but_last = ", ".join(names[:-1])
-        item_list_plain = f"**{all_but_last} & {names[-1]}**"
-        item_list_html  = f"<strong>{all_but_last} &amp; {names[-1]}</strong>"
+    names      = [item.get("name", "") for item in items if item.get("name")]
+    amount_str = fmt_currency(paid_amount)
 
     # ── PLAIN TEXT ────────────────────────────────────────────
-    plain_rows = "\n".join(f"  • {n}" for n in names) if names else "  (no items)"
     plain_body = (
-        f"Dear {customer_name},\n\n"
-        f"Thank you for choosing **{company_name}**.\n\n"
-        f"We're pleased to confirm your purchase of the following: - {item_list_plain}. "
-        f"Your order has been successfully processed, and we're excited to support you on your journey to better understand your health and genetics.\n\n"
-        f"Items purchased:\n"
-        f"{plain_rows}\n\n"
-        f"Please find your **invoice attached** for your records.\n\n"
-        f"If you have any questions about your order or the upcoming steps in your testing process, "
-        f"our team is here to help. Feel free to reach out to us anytime at **{customer_care_email}**.\n\n"
-        f"Thank you again for placing your trust in **{company_name}**. "
-        f"We look forward to guiding you through the next steps of your DNA testing experience.\n\n"
+        f"Hi {customer_name},\n\n"
+        f"Welcome to Nucleotide — your personalized Digital Health Twin.\n\n"
+        f"We're excited to begin building a dynamic health profile that evolves with you—bringing together "
+        f"your biology, lifestyle, and future health insights to guide smarter decisions on prevention, "
+        f"nutrition, and care. Your twin is designed to make complex health data simple, actionable, and "
+        f"truly personal.\n\n"
+        f"Your Order Details:\n"
+        f"- Order ID: {order_number}\n"
+        f"- Amount Paid: {amount_str}\n\n"
+        f"Your invoice is attached for your reference.\n\n"
+        f"You can explore more about your journey here: {website}\n\n"
+        f"If you have any questions, feel free to reach out at {customer_care_email}\n\n"
+        f"We're glad to have you with us as you take the first step toward a smarter, more personalized "
+        f"health journey.\n\n"
         f"Warm regards,\n"
-        f"**The {company_name} Team**\n"
-        f"{website} | {customer_care_email}\n"
+        f"The {company_name} Team\n"
+        f"{website}\n"
     )
 
     # ── HTML ──────────────────────────────────────────────────
@@ -220,15 +211,22 @@ def build_email_body(invoice_data: dict) -> tuple[str, str]:
 <head><meta charset="UTF-8"></head>
 <body style="font-family: Arial, sans-serif; color: #2d3748; max-width: 600px; margin: 0; padding: 24px;">
 
-  <p>Dear {customer_name},</p>
+  <p>Hi {customer_name},</p>
 
-  <p>Thank you for choosing <strong>{company_name}</strong>.</p>
+  <p>Welcome to Nucleotide — your personalized Digital Health Twin.</p>
 
   <p>
-    We're pleased to confirm your purchase of the following: - {item_list_html}.
-    Your order has been successfully processed, and we're excited to support you on your journey
-    to better understand your health and genetics.
+    We're excited to begin building a dynamic health profile that evolves with you—bringing together
+    your biology, lifestyle, and future health insights to guide smarter decisions on prevention,
+    nutrition, and care. Your twin is designed to make complex health data simple, actionable, and
+    truly personal.
   </p>
+
+  <p><strong>Your Order Details:</strong></p>
+  <ul style="padding-left: 20px; line-height: 1.8;">
+      <li>Order ID: {order_number}</li>
+      <li>Amount Paid: {amount_str}</li>
+  </ul>
 
   <table style="border-collapse: collapse; width: 100%; margin: 16px 0; border: 1px solid #e2e8f0;">
     <thead>
@@ -243,24 +241,27 @@ def build_email_body(invoice_data: dict) -> tuple[str, str]:
     </tbody>
   </table>
 
-  <p>Please find your <strong>invoice attached</strong> for your records.</p>
+  <p>Your invoice is attached for your reference.</p>
 
   <p>
-    If you have any questions about your order or the upcoming steps in your testing process,
-    our team is here to help. Feel free to reach out to us anytime at
-    <a href="mailto:{customer_care_email}" style="color: #1A9E8F;">{customer_care_email}</a>.
+    You can explore more about your journey here:
+    <a href="https://{website}" style="color: #1A9E8F;">{website}</a>
   </p>
 
   <p>
-    Thank you again for placing your trust in <strong>{company_name}</strong>.
-    We look forward to guiding you through the next steps of your DNA testing experience.
+    If you have any questions, feel free to reach out at
+    <a href="mailto:{customer_care_email}" style="color: #1A9E8F;">{customer_care_email}</a>
+  </p>
+
+  <p>
+    We're glad to have you with us as you take the first step toward a smarter, more personalized
+    health journey.
   </p>
 
   <p>
     Warm regards,<br>
     <strong>The {company_name} Team</strong><br>
-    <a href="https://{website}" style="color: #1A9E8F;">{website}</a> |
-    <a href="mailto:{customer_care_email}" style="color: #1A9E8F;">{customer_care_email}</a>
+    <a href="https://{website}" style="color: #1A9E8F;">{website}</a>
   </p>
 
 </body>
