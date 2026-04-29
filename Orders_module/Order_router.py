@@ -407,9 +407,9 @@ def create_order(
             item = items[0]
 
             # Blood test items: do NOT query Thyrocare cart/price-breakup for net payable.
-            # Use our catalog selling_price per member instead.
+            # Use our catalog thyrocare_price per member instead.
             if item.product_type == "blood_test" and item.thyrocare_product:
-                unit_price = float(item.thyrocare_product.selling_price or 0)
+                unit_price = float(item.thyrocare_product.thyrocare_price or 0)
                 subtotal += unit_price * len(items)
                 continue
 
@@ -451,11 +451,11 @@ def create_order(
         for item in cart_items:
             group_key = item.group_id or f"single_{item.id}"
 
-            # Blood test discount: listing_price - selling_price per member in group
+            # Blood test discount: thyrocare_listing_price - thyrocare_price per member in group
             if item.product_type == "blood_test" and item.thyrocare_product:
                 if group_key not in processed_groups:
                     group_items = [ci for ci in cart_items if (ci.group_id or f"single_{ci.id}") == group_key]
-                    discount_per_member = max(0, item.thyrocare_product.listing_price - item.thyrocare_product.selling_price)
+                    discount_per_member = max(0, (item.thyrocare_product.thyrocare_listing_price or 0) - (item.thyrocare_product.thyrocare_price or 0))
                     product_discount += discount_per_member * len(group_items)
                     processed_groups.add(group_key)
                 continue

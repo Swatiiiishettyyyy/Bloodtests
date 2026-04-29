@@ -434,8 +434,8 @@ def create_order_from_cart(
             thyrocare_product = item.thyrocare_product
             if not thyrocare_product:
                 raise ValueError(f"Blood test cart item {item.id} has no associated Thyrocare product")
-            # Do NOT query Thyrocare cart/price-breakup for net payable. Use catalog selling_price per member.
-            subtotal += float(thyrocare_product.selling_price or 0) * len(items)
+            # Do NOT query Thyrocare cart/price-breakup for net payable. Use catalog thyrocare_price per member.
+            subtotal += float(thyrocare_product.thyrocare_price or 0) * len(items)
             continue
 
         # Skip if product is deleted or missing
@@ -537,7 +537,7 @@ def create_order_from_cart(
         db.flush()
     
     def _blood_test_unit_price(cart_item) -> float:
-        return float(cart_item.thyrocare_product.selling_price or 0)
+        return float(cart_item.thyrocare_product.thyrocare_price or 0)
 
     # Create order items and snapshots
     for cart_item in cart_items:
@@ -563,8 +563,8 @@ def create_order_from_cart(
                     "thyrocare_product_id": thyrocare_product.id,
                     "thyrocare_id": thyrocare_product.thyrocare_id,
                     "Name": thyrocare_product.name,
-                    "SellingPrice": thyrocare_product.selling_price,
-                    "ListingPrice": thyrocare_product.listing_price,
+                    "SellingPrice": thyrocare_product.thyrocare_price,
+                    "ListingPrice": thyrocare_product.thyrocare_listing_price,
                     "appointment_date": str(cart_item.appointment_date),
                     "appointment_start_time": cart_item.appointment_start_time,
                 },
