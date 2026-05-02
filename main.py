@@ -55,6 +55,7 @@ from Enquiry_module.Enquiry_model import EnquiryRequest
 from Utm_tracking_module.Utm_tracking_model import UtmTracking
 from Notification_module.Notification_model import Notification, UserDeviceToken
 from Thyrocare_module.Thyrocare_model import ThyrocareProduct, ThyrocareTestParameter
+from Cart_module.BloodTestCoupon_model import BloodTestCoupon, BloodTestCartCoupon, BloodTestCouponUsage, BloodTestCouponAllowedUser
 from Thyrocare_module.thyrocare_ref_order_counter_model import ThyrocareRefOrderCounter
 from Orders_module.order_number_sequence_model import OrderNumberSequence
 
@@ -595,7 +596,7 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 
 
 # CORS configuration
-ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
+ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "*").split(",") if o.strip()]
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development").lower()
 if ALLOWED_ORIGINS == ["*"] and ENVIRONMENT == "production":
     warnings.warn("CORS is set to allow all origins. This is not recommended for production.")

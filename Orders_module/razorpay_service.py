@@ -5,6 +5,7 @@ import razorpay
 import logging
 import hmac
 import hashlib
+import time
 from typing import Dict, Any, Optional
 from dotenv import load_dotenv
 import os
@@ -50,51 +51,68 @@ def create_razorpay_order(amount: float, currency: str = "INR", receipt: Optiona
     """
     if not _RAZORPAY_ENABLED or razorpay_client is None:
         raise ConnectionError("Razorpay is not configured on this server (missing RAZORPAY_KEY_ID/RAZORPAY_KEY_SECRET).")
-    try:
-        # Convert rupees to paise (multiply by 100)
-        amount_in_paise = int(amount * 100)
-        
-        order_data = {
-            "amount": amount_in_paise,
-            "currency": currency,
-            "payment_capture": 1,  # Auto-capture payment
-        }
-        
-        if receipt:
-            order_data["receipt"] = receipt
-        
-        if notes:
-            order_data["notes"] = notes
-        
-        order = razorpay_client.order.create(data=order_data)
-        
-        logger.info(f"Razorpay order created: {order.get('id')} for amount {amount}")
-        return order
-    
-    except razorpay.errors.BadRequestError as e:
-        logger.error(f"Razorpay bad request error: {e}")
-        raise ValueError(f"Invalid request to Razorpay: {str(e)}")
-    except razorpay.errors.ServerError as e:
-        logger.error(f"Razorpay server error: {e}")
-        raise ConnectionError(f"Razorpay server error: {str(e)}")
-    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout, OSError) as e:
-        logger.error(f"Network error connecting to Razorpay: {e}", exc_info=True)
-        raise ConnectionError(
-            f"Unable to reach Razorpay payment gateway. "
-            f"This is a network connectivity issue on the server side. "
-            f"Details: {type(e).__name__}: {str(e)}"
-        )
-    except Exception as e:
-        # Check if it's a connection-related error wrapped in a generic exception
-        err_str = str(e).lower()
-        if any(kw in err_str for kw in ("connection", "timeout", "reset", "refused", "network", "aborted")):
-            logger.error(f"Network-related error creating Razorpay order: {e}", exc_info=True)
+
+    # Convert rupees to paise (multiply by 100)
+    amount_in_paise = int(amount * 100)
+    order_data: Dict[str, Any] = {
+        "amount": amount_in_paise,
+        "currency": currency,
+        "payment_capture": 1,
+    }
+    if receipt:
+        order_data["receipt"] = receipt
+    if notes:
+        order_data["notes"] = notes
+
+    _MAX_ATTEMPTS = 3
+    _RETRY_DELAY = 0.3  # seconds between retries
+
+    for attempt in range(1, _MAX_ATTEMPTS + 1):
+        try:
+            order = razorpay_client.order.create(data=order_data)
+            if attempt > 1:
+                logger.info(f"Razorpay order created on attempt {attempt}: {order.get('id')} for amount {amount}")
+            else:
+                logger.info(f"Razorpay order created: {order.get('id')} for amount {amount}")
+            return order
+
+        except razorpay.errors.BadRequestError as e:
+            logger.error(f"Razorpay bad request error: {e}")
+            raise ValueError(f"Invalid request to Razorpay: {str(e)}")
+
+        except razorpay.errors.ServerError as e:
+            logger.error(f"Razorpay server error: {e}")
+            raise ConnectionError(f"Razorpay server error: {str(e)}")
+
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout, OSError) as e:
+            if attempt < _MAX_ATTEMPTS:
+                logger.warning(
+                    f"Razorpay connection attempt {attempt} failed (will retry in {_RETRY_DELAY}s): "
+                    f"{type(e).__name__}: {e}"
+                )
+                time.sleep(_RETRY_DELAY)
+                continue
+            logger.error(f"Network error connecting to Razorpay after {_MAX_ATTEMPTS} attempts: {e}", exc_info=True)
             raise ConnectionError(
-                f"Unable to reach Razorpay payment gateway (network error). "
+                f"Unable to reach Razorpay payment gateway. "
+                f"This is a network connectivity issue on the server side. "
                 f"Details: {type(e).__name__}: {str(e)}"
             )
-        logger.error(f"Unexpected error creating Razorpay order: {e}", exc_info=True)
-        raise ValueError(f"Failed to create Razorpay order: {type(e).__name__}: {str(e)}")
+
+        except Exception as e:
+            err_str = str(e).lower()
+            if any(kw in err_str for kw in ("connection", "timeout", "reset", "refused", "network", "aborted")):
+                if attempt < _MAX_ATTEMPTS:
+                    logger.warning(f"Network-related error on attempt {attempt} (will retry in {_RETRY_DELAY}s): {e}")
+                    time.sleep(_RETRY_DELAY)
+                    continue
+                logger.error(f"Network-related error after {_MAX_ATTEMPTS} attempts: {e}", exc_info=True)
+                raise ConnectionError(
+                    f"Unable to reach Razorpay payment gateway (network error). "
+                    f"Details: {type(e).__name__}: {str(e)}"
+                )
+            logger.error(f"Unexpected error creating Razorpay order: {e}", exc_info=True)
+            raise ValueError(f"Failed to create Razorpay order: {type(e).__name__}: {str(e)}")
 
 
 def verify_payment_signature(razorpay_order_id: str, razorpay_payment_id: str, razorpay_signature: str) -> bool:
@@ -258,12 +276,11 @@ def create_razorpay_invoice_for_order(
     if not _RAZORPAY_ENABLED or razorpay_client is None:
         raise ConnectionError("Razorpay is not configured on this server (missing RAZORPAY_KEY_ID/RAZORPAY_KEY_SECRET).")
     try:
-        import time as _time
         amount_in_paise = int(total_amount * 100)
 
         invoice_data: Dict[str, Any] = {
             "type": "invoice",
-            "date": int(_time.time()),  # Required by Razorpay: Unix timestamp of invoice date
+            "date": int(time.time()),  # Required by Razorpay: Unix timestamp of invoice date
             "customer_id": customer_id,
             "currency": currency,
             "line_items": [

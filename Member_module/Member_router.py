@@ -185,11 +185,27 @@ def save_member_api(
                 to=member.email,
                 name=member.name or "there",
                 service_account_file=str(Path(__file__).parent.parent / settings.INVOICE_SERVICE_ACCOUNT_PATH),
-                sender_email=settings.INVOICE_SENDER_EMAIL,
+                sender_email=settings.INFO_SENDER_EMAIL,
             )
             logger.info(f"Welcome email sent to {member.email} for new member ID {member.id} (user {user.id})")
         except Exception as e:
             logger.error(f"Welcome email failed for member {member.id} (user {user.id}): {e}", exc_info=True)
+
+    # Send welcome SMS when the first Self profile is saved
+    if is_first_member and member.is_self_profile and member.mobile:
+        try:
+            from Login_module.OTP.msg91_service import send_flow
+            _mobile = decrypt_phone(member.mobile)
+            if _mobile and settings.MSG91_WELCOME_SMS_TEMPLATE_ID:
+                send_flow(
+                    country_code="+91",
+                    mobile=_mobile,
+                    template_id=settings.MSG91_WELCOME_SMS_TEMPLATE_ID,
+                    variables={"name": user.name or "there"},
+                )
+                logger.info(f"Welcome SMS sent to {_mobile} for new member ID {member.id} (user {user.id})")
+        except Exception as e:
+            logger.error(f"Welcome SMS failed for member {member.id} (user {user.id}): {e}", exc_info=True)
 
     message = "Member saved successfully."
     if family_status:
@@ -261,8 +277,6 @@ def save_member_api(
             device_platform = payload.get("device_platform", "unknown")
             
             if not session_id:
-                import logging
-                logger = logging.getLogger(__name__)
                 logger.warning(f"No session_id in token for user {user.id} when creating first member")
             else:
                 # generate_token_with_member now validates session internally
@@ -288,16 +302,9 @@ def save_member_api(
                         max_age=settings.ACCESS_TOKEN_EXPIRE_SECONDS,
                     )
         except HTTPException:
-            # Re-raise HTTP exceptions (like invalid token, invalid session)
-            # Don't fail member creation, but log the error
-            import logging
-            logger = logging.getLogger(__name__)
             logger.warning(f"HTTP error generating token for first member (user {user.id}, member {member.id})", exc_info=True)
             # Continue without token - member is still created successfully
         except Exception as e:
-            # Log error but don't fail the member creation
-            import logging
-            logger = logging.getLogger(__name__)
             logger.error(f"Error generating token for first member (user {user.id}, member {member.id}): {str(e)}", exc_info=True)
             # Continue without token - member is still created successfully
 

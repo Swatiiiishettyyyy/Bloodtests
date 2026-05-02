@@ -562,7 +562,7 @@ def create_order_from_cart(
                     "product_type": "blood_test",
                     "thyrocare_product_id": thyrocare_product.id,
                     "thyrocare_id": thyrocare_product.thyrocare_id,
-                    "Name": thyrocare_product.name,
+                    "Name": thyrocare_product.product_name,
                     "SellingPrice": thyrocare_product.thyrocare_price,
                     "ListingPrice": thyrocare_product.thyrocare_listing_price,
                     "appointment_date": str(cart_item.appointment_date),
@@ -1301,13 +1301,23 @@ def confirm_order_from_webhook(
         # Build items list (Product Summary only)
         # Group by group_id so couple/family packs appear as one line per pack,
         # not one line per member. If no group_id, fall back to item id.
+        from Thyrocare_module.Thyrocare_model import ThyrocareProduct as _TP
+        def _resolve_display_name(_it) -> str:
+            if _it.snapshot and _it.snapshot.product_data:
+                _nm = _it.snapshot.product_data.get("Name")
+                if _nm:
+                    return _nm
+            if _it.thyrocare_product_id:
+                _tp = db.query(_TP).filter(_TP.id == _it.thyrocare_product_id).first()
+                if _tp and _tp.product_name:
+                    return _tp.product_name
+            if _it.product:
+                return _it.product.Name
+            return "Genetic Test Product"
+
         _groups: dict = {}
         for item in order.items:
-            item_name = "Genetic Test Product"
-            if item.snapshot and item.snapshot.product_data:
-                item_name = item.snapshot.product_data.get("Name", item_name)
-            elif item.product:
-                item_name = item.product.Name
+            item_name = _resolve_display_name(item)
 
             group_key = None
             if item.snapshot and item.snapshot.cart_item_data:
@@ -1412,11 +1422,7 @@ def confirm_order_from_webhook(
         # Build product names from order items (mirrors invoice_items logic above)
         _conf_groups: dict = {}
         for _item in order.items:
-            _item_name = "Genetic Test Product"
-            if _item.snapshot and _item.snapshot.product_data:
-                _item_name = _item.snapshot.product_data.get("Name", _item_name)
-            elif _item.product:
-                _item_name = _item.product.Name
+            _item_name = _resolve_display_name(_item)
             _gkey = None
             if _item.snapshot and _item.snapshot.cart_item_data:
                 _gkey = _item.snapshot.cart_item_data.get("group_id")
@@ -1429,7 +1435,7 @@ def confirm_order_from_webhook(
             customer_name=(order.user.name if order.user else None) or "Valued Customer",
             items=_conf_items,
             service_account_file=str(_project_root / settings.INVOICE_SERVICE_ACCOUNT_PATH),
-            sender_email=settings.INVOICE_SENDER_EMAIL,
+            sender_email=settings.INFO_SENDER_EMAIL,
             gif_url=settings.ORDER_CONFIRMATION_GIF_URL,
         )
         logger.info(f"Order confirmation HTML email sent to {order.user.email} for order {order.order_number}")
@@ -1446,13 +1452,14 @@ def confirm_order_from_webhook(
     try:
         mobile = None
         if hasattr(order, "user") and order.user and getattr(order.user, "mobile", None):
-            mobile = str(order.user.mobile).strip()
+            from Login_module.Utils.phone_encryption import decrypt_phone
+            mobile = decrypt_phone(order.user.mobile)
         if mobile and settings.MSG91_ORDER_PLACED_TEMPLATE_ID:
             _send_sms_flow_best_effort(
                 country_code="+91",
                 mobile=mobile,
                 template_id=settings.MSG91_ORDER_PLACED_TEMPLATE_ID,
-                variables=None,
+                variables={"order_id": order.order_number},
             )
     except Exception as e:
         logger.warning("Order-confirm SMS hook failed (order=%s): %s", getattr(order, "order_number", None), e)

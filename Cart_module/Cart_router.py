@@ -30,6 +30,8 @@ from .coupon_service import (
     is_user_allowed_for_coupon
 )
 from .Coupon_model import Coupon, CouponType, CouponStatus
+from . import blood_test_coupon_service as bt_coupon_svc
+from .BloodTestCoupon_model import BloodTestCoupon, BloodTestCouponStatus
 from .blood_test_cart_utils import (
     retire_superseded_blood_test_lines,
     filter_latest_blood_test_group_per_product,
@@ -1046,7 +1048,7 @@ def view_cart(
                 "cart_item_ids": [i.id for i in items],
                 "thyrocare_product_id": thyrocare_product.id,
                 "thyrocare_id": thyrocare_product.thyrocare_id,
-                "product_name": thyrocare_product.name,
+                "product_name": thyrocare_product.product_name,
                 "no_of_tests_included": thyrocare_product.no_of_tests_included,
                 "is_fasting_required": thyrocare_product.is_fasting_required,
                 "member_ids": member_ids,
@@ -1147,7 +1149,7 @@ def view_cart(
             })
         # end else (genetic)
 
-    # Get applied coupon if any
+    # Get applied coupon if any (genetic products)
     applied_coupon = get_applied_coupon(db, current_user.id)
     coupon_amount = 0.0
     coupon_code = None
@@ -1159,6 +1161,43 @@ def view_cart(
         for items in grouped_items.values()
         if items and str(getattr(items[0], 'product_type', '')).lower() != "blood_test" and items[0].product
     )
+
+    # Blood test coupon (separate system)
+    bt_applied_coupon = bt_coupon_svc.get_applied_coupon(db, current_user.id)
+    blood_test_coupon_code = None
+    blood_test_coupon_amount = 0.0
+    blood_test_coupon_warning = None
+
+    blood_test_subtotal = sum(
+        items[0].thyrocare_product.thyrocare_price * len(items)
+        for items in grouped_items.values()
+        if items and str(getattr(items[0], 'product_type', '')).lower() == "blood_test" and items[0].thyrocare_product
+    )
+
+    if bt_applied_coupon:
+        bt_coupon, bt_calculated_discount, bt_error = bt_coupon_svc.validate_and_calculate_discount(
+            db, bt_applied_coupon.coupon_code, current_user.id, blood_test_subtotal
+        )
+        if bt_coupon and not bt_error:
+            blood_test_coupon_amount = bt_calculated_discount
+            blood_test_coupon_code = bt_applied_coupon.coupon_code
+            if abs(bt_applied_coupon.discount_amount - bt_calculated_discount) > 0.01:
+                bt_applied_coupon.discount_amount = bt_calculated_discount
+                db.flush()
+        else:
+            if bt_error and "minimum amount" in bt_error.lower():
+                blood_test_coupon_amount = 0.0
+                blood_test_coupon_code = bt_applied_coupon.coupon_code
+                blood_test_coupon_warning = bt_error
+            elif bt_error and any(k in bt_error.lower() for k in [
+                "expired", "not active", "invalid coupon code",
+                "already used", "no longer available",
+            ]):
+                bt_coupon_svc.remove_coupon_from_cart(db, current_user.id)
+                blood_test_coupon_warning = bt_error
+            else:
+                blood_test_coupon_amount = bt_applied_coupon.discount_amount
+                blood_test_coupon_code = bt_applied_coupon.coupon_code
 
     if applied_coupon:
         # Re-validate and recalculate discount (cart total might have changed)
@@ -1206,14 +1245,11 @@ def view_cart(
         # No need to check cart items for coupon codes anymore
         pass
     
-    # Calculate grand total
-    # subtotal_amount uses SpecialPrice, so we only subtract coupon_amount
-    grand_total = subtotal_amount + delivery_charge - coupon_amount
+    # Calculate grand total (both genetic and blood-test coupons)
+    grand_total = subtotal_amount + delivery_charge - coupon_amount - blood_test_coupon_amount
     grand_total = max(0.0, grand_total)
 
-    # you_save = coupon discount only
-    # MRP discount is already reflected in subtotal (SpecialPrice), so we don't double-count it
-    you_save = coupon_amount
+    you_save = coupon_amount + blood_test_coupon_amount
     discount_amount = 0  # kept for backward compat in summary response
 
     # Get cart_id from cart or first item
@@ -1234,6 +1270,9 @@ def view_cart(
         "coupon_amount": coupon_amount,
         "coupon_code": coupon_code,
         "coupon_warning": coupon_warning,
+        "blood_test_coupon_code": blood_test_coupon_code,
+        "blood_test_coupon_amount": blood_test_coupon_amount,
+        "blood_test_coupon_warning": blood_test_coupon_warning,
         "you_save": you_save,
         "delivery_charge": delivery_charge,
         "grand_total": grand_total
@@ -1746,3 +1785,136 @@ def get_coupon_allowlist(
         "total": len(entries),
         "entries": [{"id": e.id, "coupon_id": e.coupon_id, "user_id": e.user_id, "mobile": e.mobile} for e in entries]
     }
+
+
+# ---------------------------------------------------------------------------
+# Blood-test coupon endpoints
+# ---------------------------------------------------------------------------
+
+@router.post("/blood-test/apply-coupon")
+def apply_blood_test_coupon(
+    request_data: ApplyCouponRequest,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Apply a blood-test coupon to the user's blood-test cart items."""
+    try:
+        subtotal = bt_coupon_svc._get_bt_subtotal(db, current_user.id)
+
+        if subtotal == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Your blood test cart is empty. Please add blood test items before applying a coupon."
+            )
+
+        bt_coupon_svc.remove_coupon_from_cart(db, current_user.id)
+
+        success, discount_amount, message, coupon = bt_coupon_svc.apply_coupon_to_cart(
+            db, current_user.id, request_data.coupon_code, subtotal
+        )
+
+        if not success:
+            raise HTTPException(status_code=400, detail=message)
+
+        db.commit()
+
+        final_amount = max(0.0, subtotal - discount_amount)
+        return {
+            "status": "success",
+            "message": message,
+            "data": {
+                "coupon_code": coupon.coupon_code,
+                "discount_type": coupon.discount_type.value,
+                "discount_value": coupon.discount_value,
+                "special_type": coupon.special_type.value,
+                "discount_amount": discount_amount,
+                "subtotal": subtotal,
+                "final_amount": final_amount,
+            }
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Something went wrong while applying the coupon. Please try again.")
+
+
+@router.delete("/blood-test/remove-coupon")
+def remove_blood_test_coupon(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Remove the applied blood-test coupon from the user's cart."""
+    try:
+        removed = bt_coupon_svc.remove_coupon_from_cart(db, current_user.id)
+        db.commit()
+        if not removed:
+            return {"status": "success", "message": "No blood test coupon was applied to your cart."}
+        return {"status": "success", "message": "Blood test coupon removed successfully."}
+    except Exception:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Something went wrong while removing the coupon. Please try again.")
+
+
+@router.get("/blood-test/list-coupons")
+def list_blood_test_coupons(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """List blood-test coupons the current user can actually apply."""
+    try:
+        from Login_module.Utils.datetime_utils import now_ist, to_ist
+        now = now_ist()
+
+        coupons = db.query(BloodTestCoupon).filter(
+            BloodTestCoupon.status == BloodTestCouponStatus.ACTIVE
+        ).all()
+
+        coupon_list = []
+        for coupon in coupons:
+            valid_from_ist = to_ist(coupon.valid_from) if coupon.valid_from else None
+            valid_until_ist = to_ist(coupon.valid_until) if coupon.valid_until else None
+
+            if valid_from_ist and now < valid_from_ist:
+                continue
+            if valid_until_ist and now > valid_until_ist:
+                continue
+
+            if bt_coupon_svc.is_coupon_usage_limit_reached(db, coupon):
+                continue
+
+            max_per_user = coupon.max_uses_per_user if coupon.max_uses_per_user is not None else 1
+            from .BloodTestCoupon_model import BloodTestCouponUsage as _BTUsage
+            user_uses = (
+                db.query(func.count(_BTUsage.id))
+                .filter(_BTUsage.coupon_id == coupon.id, _BTUsage.user_id == current_user.id)
+                .scalar()
+                or 0
+            )
+            if user_uses >= max_per_user:
+                continue
+
+            if not bt_coupon_svc.is_user_allowed_for_coupon(db, coupon, current_user.id, current_user.mobile or ""):
+                continue
+
+            coupon_list.append({
+                "coupon_code": coupon.coupon_code,
+                "description": coupon.description,
+                "discount_type": coupon.discount_type.value,
+                "discount_value": coupon.discount_value,
+                "min_order_amount": coupon.min_order_amount,
+                "max_discount_amount": coupon.max_discount_amount,
+                "special_type": coupon.special_type.value,
+                "valid_until": to_ist_isoformat(coupon.valid_until),
+            })
+
+        return {
+            "status": "success",
+            "message": f"Found {len(coupon_list)} available blood test coupon(s)",
+            "data": {"total_coupons": len(coupon_list), "coupons": coupon_list}
+        }
+    except Exception:
+        raise HTTPException(status_code=500, detail="Something went wrong while loading blood test coupons. Please try again.")

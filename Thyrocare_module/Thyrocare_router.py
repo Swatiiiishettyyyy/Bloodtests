@@ -408,7 +408,7 @@ def search_slots(
     return {
         "status": "success",
         "group_id": payload.group_id,
-        "product_name": (product.product_name or product.name),
+        "product_name": product.product_name,
         "is_fasting_required": product.is_fasting_required,
         "pincode": pincode,
         "members_count": len(items),
@@ -514,7 +514,7 @@ def add_blood_test_to_cart(
             "group_id": group_id,
             "cart_id": cart.id,
             "thyrocare_product_id": product.id,
-            "product_name": (product.product_name or product.name),
+            "product_name": product.product_name,
             "member_ids": item.member_ids,
             "address_id": item.address_id,
             "cart_item_ids": [ci.id for ci in created_items],
@@ -557,7 +557,7 @@ def get_active_cart(
         "data": {
             "group_id": first.group_id,
             "thyrocare_product_id": product_id,
-            "product_name": (product.product_name or product.name) if product else "",
+            "product_name": product.product_name if product else "",
             "address_id": first.address_id,
             "member_ids": [ci.member_id for ci in items],
             "appointment_date": first.appointment_date,
@@ -613,7 +613,7 @@ def get_all_active_carts(
         groups.append({
             "group_id": group_id,
             "thyrocare_product_id": product_id,
-            "product_name": product.name if product else "",
+            "product_name": product.product_name if product else "",
             "address_id": first.address_id,
             "member_ids": [ci.member_id for ci in group_items],
             "appointment_date": first.appointment_date,
@@ -721,7 +721,7 @@ def upsert_blood_test_cart(
             "group_id": group_id,
             "cart_id": cart.id,
             "thyrocare_product_id": product.id,
-            "product_name": (product.product_name or product.name),
+            "product_name": product.product_name,
             "member_ids": item.member_ids,
             "address_id": item.address_id,
             "cart_item_ids": [ci.id for ci in created_items],
@@ -867,7 +867,7 @@ def cart_price_breakup(
         group_summaries.append({
             "group_id": group_id,
             "thyrocare_product_id": product.id,
-            "product_name": product.name,
+            "product_name": product.product_name,
             "members_count": len(items),
         })
 
@@ -1242,7 +1242,7 @@ def create_thyrocare_order(
         "data": {
             "thyrocare_order_no": thyrocare_order_no,
             "group_id": payload.group_id,
-            "product_name": product.name,
+            "product_name": product.product_name,
             "members_count": len(items),
             "appointment_date": str(first_item.appointment_date),
             "appointment_start_time": first_item.appointment_start_time,
@@ -1327,7 +1327,7 @@ def list_failed_thyrocare_bookings(
             "user_id": oi.user_id,
             "member_id": oi.member_id,
             "thyrocare_product_id": oi.thyrocare_product_id,
-            "product_name": product.name if product else None,
+            "product_name": product.product_name if product else None,
             "thyrocare_booking_status": oi.thyrocare_booking_status,
             "thyrocare_booking_error": oi.thyrocare_booking_error,
             "created_at": str(oi.created_at) if oi.created_at else None,
@@ -2369,10 +2369,8 @@ async def thyrocare_webhook(
                         patient_id=pid,
                     )
 
-        # When any patient in this webhook has a report available, mark matching
-        # OrderItems as COMPLETED so the frontend "View report" gate is satisfied.
-        # (OrderDetailsPage.tsx:1004 checks order_status === 'COMPLETED')
-        if any_report_available and our_order_id:
+        # Mark each OrderItem COMPLETED only when its own patient's report is ready.
+        if our_order_id:
             from Orders_module.Order_model import Order as _Order, OrderStatus as _OS
             _tc_items = (
                 db.query(OrderItem)
@@ -2383,10 +2381,19 @@ async def thyrocare_webhook(
                 .all()
             )
             for _it in _tc_items:
-                if _it.order_status != _OS.COMPLETED:
-                    _it.order_status = _OS.COMPLETED
-                    _it.status_updated_at = now_ist()
-                _it.thyrocare_booking_status = "COMPLETED"
+                patient_for_item = (
+                    db.query(ThyrocarePatientTracking)
+                    .filter(
+                        ThyrocarePatientTracking.thyrocare_order_id == thyrocare_order_id,
+                        ThyrocarePatientTracking.member_id == _it.member_id,
+                    )
+                    .first()
+                )
+                if patient_for_item and patient_for_item.is_report_available:
+                    if _it.order_status != _OS.COMPLETED:
+                        _it.order_status = _OS.COMPLETED
+                        _it.status_updated_at = now_ist()
+                    _it.thyrocare_booking_status = "COMPLETED"
 
             # Promote parent Order to COMPLETED when all its blood-test items are done
             _parent = db.query(_Order).filter(_Order.id == our_order_id).first()
@@ -2399,12 +2406,69 @@ async def thyrocare_webhook(
                     )
                     .all()
                 )
+                _order_just_completed = False
                 if _all_blood and all(i.order_status == _OS.COMPLETED for i in _all_blood):
                     if _parent.order_status not in (_OS.COMPLETED, _OS.CANCELLED):
                         _parent.order_status = _OS.COMPLETED
                         _parent.status_updated_at = now_ist()
+                        _order_just_completed = True
 
         db.commit()
+
+        # Email: notify user when all blood-test reports are ready (best effort)
+        try:
+            if _order_just_completed and _parent and getattr(_parent, "user", None):
+                _user_email = getattr(_parent.user, "email", None)
+                if _user_email and settings.INVOICE_SERVICE_ACCOUNT_PATH:
+                    import sys as _sys
+                    from pathlib import Path as _Path
+                    _inv_gen = str(_Path(__file__).parent.parent / "invoice generation")
+                    if _inv_gen not in _sys.path:
+                        _sys.path.insert(0, _inv_gen)
+                    from report_ready_email import send_report_ready_email
+                    from Thyrocare_module.Thyrocare_model import ThyrocareProduct as _TPModel
+                    def _name_for(_it):
+                        if _it.snapshot and _it.snapshot.product_data:
+                            _nm = _it.snapshot.product_data.get("Name")
+                            if _nm:
+                                return _nm
+                        if getattr(_it, "thyrocare_product_id", None):
+                            _tp = db.query(_TPModel).filter(_TPModel.id == _it.thyrocare_product_id).first()
+                            if _tp and _tp.product_name:
+                                return _tp.product_name
+                        if getattr(_it, "product", None) and getattr(_it.product, "Name", None):
+                            return _it.product.Name
+                        return None
+                    _product_names = list(dict.fromkeys(
+                        n for n in (_name_for(it) for it in _all_blood) if n
+                    ))
+                    _product_str = ", ".join(_product_names) if _product_names else "your recent test"
+                    _member_name = (
+                        getattr(_all_blood[0].member, "name", None)
+                        if _all_blood and getattr(_all_blood[0], "member", None) else None
+                    ) or getattr(_parent.user, "name", None) or "there"
+                    send_report_ready_email(
+                        to=_user_email,
+                        name=_member_name,
+                        product=_product_str,
+                        service_account_file=str(_Path(__file__).parent.parent / settings.INVOICE_SERVICE_ACCOUNT_PATH),
+                        sender_email=settings.INFO_SENDER_EMAIL,
+                    )
+        except Exception as _e:
+            logger.warning("Report ready email failed (order=%s): %s", our_order_id, _e)
+
+        # SMS: notify user when blood-test report is ready (best effort)
+        try:
+            if _order_just_completed and _parent and getattr(_parent, "user", None) and settings.MSG91_REPORT_READY_TEMPLATE_ID:
+                from Login_module.Utils.phone_encryption import decrypt_phone
+                _sms_mobile = None
+                if getattr(_parent.user, "mobile", None):
+                    _sms_mobile = decrypt_phone(_parent.user.mobile)
+                if _sms_mobile:
+                    from Login_module.OTP.msg91_service import send_flow
+                    send_flow("+91", _sms_mobile, settings.MSG91_REPORT_READY_TEMPLATE_ID, variables={"url": "www.nucleotide.life"})
+        except Exception as _e:
+            logger.warning("Report ready SMS failed (order=%s): %s", our_order_id, _e)
 
         # SMS: send welcome message when Thyrocare status becomes ASSIGNED (best effort)
         try:
@@ -2459,7 +2523,7 @@ def get_my_thyrocare_orders(
         for p in db.query(_TP).filter(_TP.id.in_(prod_internal_ids)).all():
             prod_meta[p.id] = {
                 "thyrocare_catalog_product_id": p.thyrocare_id,
-                "thyrocare_product_name": p.name,
+                "thyrocare_product_name": p.product_name,
             }
 
     order_ids = [o.id for o in orders]
@@ -2566,7 +2630,7 @@ def get_my_lab_reports(
     prod_name_by_id: dict = {}
     if product_ids:
         for p in db.query(_TP).filter(_TP.id.in_(product_ids)).all():
-            prod_name_by_id[p.id] = p.product_name or p.name or ""
+            prod_name_by_id[p.id] = p.product_name or ""
 
     tc_to_product_name = {
         tc_id: prod_name_by_id.get(prod_id, "")
@@ -2692,7 +2756,7 @@ def get_thyrocare_order_details_combined(
         if _p:
             pm_detail = {
                 "thyrocare_catalog_product_id": _p.thyrocare_id,
-                "thyrocare_product_name": _p.name,
+                "thyrocare_product_name": _p.product_name,
             }
 
     return {
