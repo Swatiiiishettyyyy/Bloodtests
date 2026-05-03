@@ -1044,7 +1044,7 @@ def view_cart(
                 "country": address.country if address else None,
             }
 
-            total = thyrocare_product.selling_price * len(items)
+            total = thyrocare_product.thyrocare_price * len(items)
             subtotal_amount += total
 
             cart_item_details.append({
@@ -1060,8 +1060,8 @@ def view_cart(
                 "members": members_detail,
                 "members_count": len(items),
                 "address": address_details,
-                "price_per_member": thyrocare_product.selling_price,
-                "listing_price_per_member": thyrocare_product.listing_price,
+                "price_per_member": thyrocare_product.thyrocare_price,
+                "listing_price_per_member": thyrocare_product.thyrocare_listing_price,
                 "total_amount": total,
                 "group_id": item.group_id,
                 "appointment_date": str(item.appointment_date) if item.appointment_date else None,
@@ -1251,7 +1251,7 @@ def view_cart(
         pass
     
     # Calculate grand total (both genetic and blood-test coupons)
-    grand_total = subtotal_amount + delivery_charge - coupon_amount - blood_test_coupon_amount
+    grand_total = subtotal_amount + delivery_charge - blood_test_coupon_amount
     grand_total = max(0.0, grand_total)
 
     you_save = coupon_amount + blood_test_coupon_amount

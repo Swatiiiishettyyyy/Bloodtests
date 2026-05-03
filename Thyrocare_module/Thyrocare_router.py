@@ -518,8 +518,8 @@ def add_blood_test_to_cart(
             "member_ids": item.member_ids,
             "address_id": item.address_id,
             "cart_item_ids": [ci.id for ci in created_items],
-            "price_per_member": product.selling_price,
-            "total_amount": product.selling_price * num_members,
+            "price_per_member": product.thyrocare_price,
+            "total_amount": product.thyrocare_price * num_members,
         },
     }
 
@@ -725,8 +725,8 @@ def upsert_blood_test_cart(
             "member_ids": item.member_ids,
             "address_id": item.address_id,
             "cart_item_ids": [ci.id for ci in created_items],
-            "price_per_member": product.selling_price,
-            "total_amount": product.selling_price * num_members,
+            "price_per_member": product.thyrocare_price,
+            "total_amount": product.thyrocare_price * num_members,
         },
     }
 
@@ -857,7 +857,7 @@ def cart_price_breakup(
                         "name": product.name,
                         "rate": {
                             "currency": "INR",
-                            "mrp": str(int(product.listing_price)) if product.listing_price > 0 else str(int(product.selling_price))
+                            "mrp": str(int(product.thyrocare_listing_price)) if product.thyrocare_listing_price > 0 else str(int(product.thyrocare_price))
                         }
                     }
                 ]

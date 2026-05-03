@@ -36,7 +36,7 @@ def _get_bt_subtotal(db: Session, user_id: int) -> float:
         .all()
     )
     return sum(
-        i.quantity * (i.thyrocare_product.selling_price or 0.0)
+        i.quantity * (i.thyrocare_product.thyrocare_price or 0.0)
         for i in bt_items
         if i.thyrocare_product
     )

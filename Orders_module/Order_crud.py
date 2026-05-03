@@ -330,6 +330,8 @@ def create_order_from_cart(
     placed_by_member_id: Optional[int] = None,
     prevalidated_coupon_code: Optional[str] = None,
     prevalidated_coupon_discount: float = 0.0,
+    prevalidated_blood_test_coupon_code: Optional[str] = None,
+    prevalidated_blood_test_coupon_amount: float = 0.0,
 ) -> Order:
     """
     Create order from cart items.
@@ -481,12 +483,13 @@ def create_order_from_cart(
     
     # Calculate total amount
     # Note: subtotal already uses SpecialPrice (product discount is already applied)
-    # So we only subtract coupon_discount, not discount
-    # This matches the corrected cart calculation: grand_total = subtotal_amount + delivery_charge - coupon_amount
-    total_amount = subtotal + delivery_charge - coupon_discount
+    # So we only subtract coupon_discount and blood_test_coupon_amount, not discount
+    blood_test_coupon_code = prevalidated_blood_test_coupon_code
+    blood_test_coupon_amount = prevalidated_blood_test_coupon_amount
+    total_amount = subtotal + delivery_charge - coupon_discount - blood_test_coupon_amount
     # Ensure total is not negative
     total_amount = max(0.0, total_amount)
-    
+
     # Create order (without payment fields - payment is in separate table)
     order = Order(
         order_number=generate_order_number(db),
@@ -498,6 +501,8 @@ def create_order_from_cart(
         discount=discount,
         coupon_code=coupon_code,
         coupon_discount=coupon_discount,
+        blood_test_coupon_code=blood_test_coupon_code,
+        blood_test_coupon_amount=blood_test_coupon_amount,
         total_amount=total_amount,
         payment_status=PaymentStatus.PENDING,  # Order created, payment not started (denormalized for quick queries)
         order_status=OrderStatus.PENDING_PAYMENT  # Order created, waiting for payment
@@ -2108,6 +2113,8 @@ def create_pending_checkout(
     placed_by_member_id: Optional[int] = None,
     coupon_code: Optional[str] = None,
     coupon_discount: float = 0.0,
+    blood_test_coupon_code: Optional[str] = None,
+    blood_test_coupon_amount: float = 0.0,
 ) -> "PendingCheckout":
     """
     Create a PendingCheckout record when the user initiates payment.
@@ -2124,6 +2131,8 @@ def create_pending_checkout(
         placed_by_member_id=placed_by_member_id,
         coupon_code=coupon_code,
         coupon_discount=coupon_discount,
+        blood_test_coupon_code=blood_test_coupon_code,
+        blood_test_coupon_amount=blood_test_coupon_amount,
     )
     db.add(pc)
     db.commit()
@@ -2181,6 +2190,8 @@ def create_order_post_payment(
         placed_by_member_id=pc.placed_by_member_id,
         prevalidated_coupon_code=pc.coupon_code,
         prevalidated_coupon_discount=pc.coupon_discount,
+        prevalidated_blood_test_coupon_code=pc.blood_test_coupon_code,
+        prevalidated_blood_test_coupon_amount=pc.blood_test_coupon_amount or 0.0,
     )
     # create_order_from_cart commits internally — order + payment row now exist
 
@@ -2198,6 +2209,21 @@ def create_order_post_payment(
         payment_method_details=payment_method_details,
         payment_method_metadata=payment_method_metadata,
     )
+
+    # Record blood test coupon usage now that payment is confirmed
+    if order.blood_test_coupon_code:
+        try:
+            from Cart_module.blood_test_coupon_service import record_coupon_usage as bt_record_usage
+            bt_record_usage(
+                db,
+                order.blood_test_coupon_code,
+                order.user_id,
+                order.id,
+                order.order_number,
+                order.blood_test_coupon_amount or 0.0,
+            )
+        except Exception as bt_coupon_err:
+            logger.error(f"Failed to record blood test coupon usage for order {order.order_number}: {bt_coupon_err}")
 
     # Book Thyrocare orders for any blood test items (non-blocking).
     # IMPORTANT: PendingCheckout flow previously confirmed payment but skipped booking entirely,
