@@ -34,7 +34,7 @@ class BloodTestCoupon(Base):
     coupon_code = Column(String(50), unique=True, nullable=False, index=True)
     description = Column(String(500), nullable=True)
 
-    discount_type = Column(Enum(BloodTestCouponType), nullable=False, default=BloodTestCouponType.PERCENTAGE)
+    discount_type = Column(Enum(BloodTestCouponType, values_callable=lambda x: [e.value for e in x]), nullable=False, default=BloodTestCouponType.PERCENTAGE)
     discount_value = Column(Float, nullable=False)
 
     min_order_amount = Column(Float, default=0.0, nullable=False)
@@ -46,8 +46,8 @@ class BloodTestCoupon(Base):
     valid_from = Column(DateTime(timezone=True), nullable=False)
     valid_until = Column(DateTime(timezone=True), nullable=False)
 
-    status = Column(Enum(BloodTestCouponStatus), nullable=False, default=BloodTestCouponStatus.ACTIVE, index=True)
-    special_type = Column(Enum(BloodTestCouponSpecialType), nullable=False, default=BloodTestCouponSpecialType.STANDARD)
+    status = Column(Enum(BloodTestCouponStatus, values_callable=lambda x: [e.value for e in x]), nullable=False, default=BloodTestCouponStatus.ACTIVE, index=True)
+    special_type = Column(Enum(BloodTestCouponSpecialType, values_callable=lambda x: [e.value for e in x]), nullable=False, default=BloodTestCouponSpecialType.STANDARD)
 
     created_at = Column(DateTime(timezone=True), default=now_ist, nullable=False)
     updated_at = Column(DateTime(timezone=True), onupdate=now_ist)
