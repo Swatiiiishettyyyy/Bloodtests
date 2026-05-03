@@ -598,9 +598,14 @@ def save_member(
             try:
                 db.flush()  # Flush user updates before committing audit log
             except Exception as e:
+                db.rollback()
                 # Check if it's a duplicate email error
                 error_str = str(e).lower()
-                if 'duplicate entry' in error_str and 'email' in error_str:
+                if (
+                    ('duplicate entry' in error_str and 'email' in error_str) or
+                    ('duplicate key' in error_str and 'email' in error_str) or
+                    ('unique constraint' in error_str and 'email' in error_str)
+                ):
                     raise HTTPException(
                         status_code=400,
                         detail=f"Given email already exists for different user"

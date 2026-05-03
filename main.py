@@ -595,24 +595,51 @@ async def http_exception_handler(request: Request, exc: HTTPException):
     )
 
 
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    """Return JSON for unexpected errors instead of plain text 500 responses."""
+    client_ip = request.client.host if request.client else "unknown"
+    user_agent = request.headers.get("user-agent", "unknown")
+    logger.error(
+        f"[ERR] {request.method} {request.url.path} | "
+        f"Status: 500 (SERVER_ERROR) | Error: {str(exc)} | "
+        f"IP: {client_ip} | User-Agent: {user_agent}",
+        exc_info=True,
+    )
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={
+            "status": "error",
+            "message": "Internal server error. Please try again.",
+            "status_code": status.HTTP_500_INTERNAL_SERVER_ERROR,
+        },
+    )
+
+
 # CORS configuration
 ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "*").split(",") if o.strip()]
+ALLOWED_ORIGIN_REGEX = os.getenv("ALLOWED_ORIGIN_REGEX", "").strip() or None
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development").lower()
 if ALLOWED_ORIGINS == ["*"] and ENVIRONMENT == "production":
     warnings.warn("CORS is set to allow all origins. This is not recommended for production.")
+logger.info("CORS allowed origins: %s", ALLOWED_ORIGINS)
+if ALLOWED_ORIGIN_REGEX:
+    logger.info("CORS allowed origin regex: %s", ALLOWED_ORIGIN_REGEX)
 
 # Middleware
 app.add_middleware(RequestLoggingMiddleware)
+# CORS is added last so it wraps the other app middlewares.
+from Login_module.Utils.csrf_middleware import CSRFProtectionMiddleware
+app.add_middleware(CSRFProtectionMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=ALLOWED_ORIGIN_REGEX,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE","PATCH","OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-Requested-With", "X-CSRF-Token", "X-CSRF-TOKEN"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["*"],
 )
-# CSRF protection middleware (must be after CORS)
-from Login_module.Utils.csrf_middleware import CSRFProtectionMiddleware
-app.add_middleware(CSRFProtectionMiddleware)
 
 # Include routers
 app.include_router(otp_router)  # /auth/send-otp, /auth/verify-otp

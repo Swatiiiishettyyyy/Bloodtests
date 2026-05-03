@@ -107,6 +107,12 @@ def check_refresh_rate_limit(session_id: int) -> tuple[bool, int]:
     
     try:
         redis_client = _get_redis_client()
+        if redis_client is None:
+            logger.warning(
+                "Redis unavailable for refresh rate limit; allowing refresh | "
+                f"Session ID: {session_id}"
+            )
+            return True, REFRESH_TOKEN_MAX_ATTEMPTS_PER_SESSION
         key = _refresh_rate_limit_key(session_id)
         attempts = redis_client.get(key)
         
@@ -125,8 +131,9 @@ def check_refresh_rate_limit(session_id: int) -> tuple[bool, int]:
         return True, max(0, remaining)
     except Exception as e:
         logger.error(f"Redis error checking refresh rate limit: {e}")
-        # Fail closed for security - deny if Redis is down
-        return False, 0
+        # Do not block token refresh if Redis is unavailable; DB token validation
+        # still protects reuse/expiry and prevents locking out legitimate users.
+        return True, REFRESH_TOKEN_MAX_ATTEMPTS_PER_SESSION
 
 
 def record_failed_refresh_attempt(session_id: int) -> bool:
