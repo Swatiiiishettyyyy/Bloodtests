@@ -217,7 +217,11 @@ def save_member_api(
                     country_code="+91",
                     mobile=_mobile,
                     template_id=settings.MSG91_WELCOME_SMS_TEMPLATE_ID,
-                    variables={"name": user.name or "there"},
+                    variables={
+                        "name": user.name or member.name or "there",
+                        "Name": user.name or member.name or "there",
+                        "NAME": user.name or member.name or "there",
+                    },
                 )
                 logger.info(f"Welcome SMS sent to {_mobile} for new member ID {member.id} (user {user.id})")
         except Exception as e:

@@ -14,8 +14,9 @@ class Msg91SendError(RuntimeError):
 
 def _msisdn(country_code: str, mobile: str) -> str:
     # MSG91 expects numeric MSISDN like "91XXXXXXXXXX"
-    cc = (country_code or "").strip().lstrip("+")
-    return f"{cc}{mobile}".strip()
+    cc = "".join(ch for ch in str(country_code or "") if ch.isdigit()) or "91"
+    number = "".join(ch for ch in str(mobile or "") if ch.isdigit())
+    return f"{cc}{number}".strip()
 
 
 def send_flow(country_code: str, mobile: str, template_id: str, variables: Optional[dict] = None) -> Optional[str]:
@@ -42,12 +43,13 @@ def send_flow(country_code: str, mobile: str, template_id: str, variables: Optio
     payload = {
         "template_id": template_id,
         "short_url": str(settings.MSG91_SHORT_URL),
+        "short_url_expiry": "3600",
         "realTimeResponse": str(settings.MSG91_REALTIME_RESPONSE),
         "recipients": [recipient],
     }
 
     try:
-        resp = requests.post(url, json=payload, headers=headers, timeout=10)
+        resp = requests.post(url, json=payload, headers=headers, timeout=15)
     except Exception as e:
         raise Msg91SendError(f"MSG91 request failed: {e}") from e
 
@@ -64,8 +66,16 @@ def send_flow(country_code: str, mobile: str, template_id: str, variables: Optio
     msg = None
     if isinstance(data, dict):
         msg = data.get("message") or data.get("Message") or data.get("request_id")
+        response_type = str(data.get("type", "")).lower()
+        if response_type and response_type != "success":
+            raise Msg91SendError(f"MSG91 returned error response: {data}")
 
-    logger.info("MSG91 Flow sent successfully to %s (template_id=%s)", _msisdn(country_code, mobile), template_id)
+    logger.info(
+        "MSG91 Flow sent successfully to %s (template_id=%s, response=%s)",
+        _msisdn(country_code, mobile),
+        template_id,
+        data,
+    )
     return msg
 
 
