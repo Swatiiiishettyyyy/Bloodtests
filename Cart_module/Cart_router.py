@@ -939,6 +939,11 @@ def view_cart(
         )
     
     all_cart_items = query.order_by(CartItem.group_id, CartItem.created_at).all()
+    all_cart_items = [
+    i for i in all_cart_items
+    if str(getattr(i, 'product_type', 'blood_test')).lower() == 'blood_test'
+    ]
+
     all_cart_items = filter_latest_blood_test_group_per_product(all_cart_items)
 
     # If cart doesn't exist but user has items, create cart now
