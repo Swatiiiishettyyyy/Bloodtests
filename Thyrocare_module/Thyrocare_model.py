@@ -38,8 +38,8 @@ class ThyrocareProduct(Base):
     # Category
     category = Column(String(200), nullable=True, index=True)
 
-    # Reference pricing from Thyrocare catalogue (optional; may differ from listing/selling)
-    thyrocare_price = Column(Float, nullable=True)
+    # Reference pricing from Thyrocare catalogue (may differ from listing/selling)
+    thyrocare_price = Column(Float, nullable=False, default=0.0)
 
     # Generated listing price derived from Thyrocare MRP/price
     thyrocare_listing_price = Column(

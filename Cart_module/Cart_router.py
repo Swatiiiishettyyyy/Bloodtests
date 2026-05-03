@@ -1841,8 +1841,9 @@ def apply_blood_test_coupon(
     except HTTPException:
         db.rollback()
         raise
-    except Exception:
+    except Exception as e:
         db.rollback()
+        logger.error("apply_blood_test_coupon failed: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail="Something went wrong while applying the coupon. Please try again.")
 
 

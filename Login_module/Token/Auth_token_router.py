@@ -684,6 +684,7 @@ def refresh_token(
             return RefreshTokenResponse(
                 status="success",
                 message="Token refreshed successfully",
+                access_token=new_access_token,
                 csrf_token=csrf_token,
                 expires_in=settings.ACCESS_TOKEN_EXPIRE_SECONDS
             )
