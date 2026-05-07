@@ -743,7 +743,7 @@ def verify_payment(
                     user_mob = _dec_phone(raw_mob) if raw_mob else ""
                 except Exception:
                     user_mob = raw_mob
-                _send_msg91_flow(settings.MSG91_ORDER_PLACED_TEMPLATE_ID, user_mob)
+                _send_msg91_flow(settings.MSG91_TEMPLATE_ID_PHLEBO_COLLECTION_BLOOD, user_mob)
             except Exception:
                 logger.warning("Order placed message send failed (ignored).", exc_info=True)
 

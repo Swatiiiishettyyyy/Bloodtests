@@ -1447,11 +1447,11 @@ def confirm_order_from_webhook(
         mobile = None
         if hasattr(order, "user") and order.user and getattr(order.user, "mobile", None):
             mobile = str(order.user.mobile).strip()
-        if mobile and settings.MSG91_ORDER_PLACED_TEMPLATE_ID:
+        if mobile and settings.MSG91_TEMPLATE_ID_PHLEBO_COLLECTION_BLOOD:
             _send_sms_flow_best_effort(
                 country_code="+91",
                 mobile=mobile,
-                template_id=settings.MSG91_ORDER_PLACED_TEMPLATE_ID,
+                template_id=settings.MSG91_TEMPLATE_ID_PHLEBO_COLLECTION_BLOOD,
                 variables=None,
             )
     except Exception as e:

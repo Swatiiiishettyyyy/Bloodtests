@@ -76,7 +76,7 @@ def send_otp_via_msg91_flow(country_code: str, mobile: str, otp: str) -> Optiona
     Returns message/id from MSG91 on success (when available).
     Raises Msg91SendError on failure.
     """
-    if not settings.MSG91_OTP_TEMPLATE_ID:
-        raise Msg91SendError("MSG91 is not configured (missing MSG91_OTP_TEMPLATE_ID).")
-    return send_flow(country_code, mobile, settings.MSG91_OTP_TEMPLATE_ID, variables={"OTP": str(otp)})
+    if not settings.MSG91_TEMPLATE_ID_OTP_LOGIN:
+        raise Msg91SendError("MSG91 is not configured (missing MSG91_TEMPLATE_ID_OTP_LOGIN).")
+    return send_flow(country_code, mobile, settings.MSG91_TEMPLATE_ID_OTP_LOGIN, variables={"OTP": str(otp)})
 

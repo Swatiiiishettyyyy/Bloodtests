@@ -92,6 +92,7 @@ from Enquiry_module.Enquiry_router import router as enquiry_router
 from Utm_tracking_module.Utm_tracking_router import router as utm_tracking_router
 from Thyrocare_module.Thyrocare_router import router as thyrocare_router
 from Upload_module.Upload_router import router as upload_router
+from SMS_module.SMS_router import router as sms_router
 
 # Google Meet API router
 try:
@@ -330,6 +331,12 @@ def custom_openapi():
         "/openapi.json",
         "/auth/send-otp",
         "/auth/verify-otp",
+        "/sms/send-welcome",
+        "/sms/send-report-ready",
+        "/sms/send-order-confirmation",
+        "/sms/send-phlebo-blood",
+        "/sms/send-phlebo-genetic",
+        "/sms/send-post-order-survey",
         "/newsletter/subscribe",
         "/api/tracking/event",  # Tracking endpoint - no CSRF required
     }
@@ -615,6 +622,7 @@ app.add_middleware(CSRFProtectionMiddleware)
 
 # Include routers
 app.include_router(otp_router)  # /auth/send-otp, /auth/verify-otp
+app.include_router(sms_router)  # /sms/send-welcome, /sms/send-report-ready, etc.
 app.include_router(twilio_router)  # /auth/twilio/send-verification, /auth/twilio/verify
 app.include_router(auth_token_router)  # /auth/refresh, /auth/logout, /auth/logout-all (dual-token strategy)
 app.include_router(product_router)

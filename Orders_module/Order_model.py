@@ -121,6 +121,8 @@ class OrderItem(Base):
     thyrocare_product_id = Column(Integer, ForeignKey("thyrocare_products.id", ondelete="RESTRICT"), nullable=True)
     thyrocare_booking_status = Column(String(20), nullable=True, index=True)  # PENDING, BOOKED, FAILED
     thyrocare_booking_error = Column(String(500), nullable=True)  # Error message if booking failed
+    thyrocare_request_payload = Column(JSON, nullable=True)   # payload sent to Thyrocare API
+    thyrocare_response_body = Column(Text, nullable=True)     # raw response body from Thyrocare API
     
     # Per-item status tracking (for different addresses in couple/family packs)
     order_status = Column(Enum(OrderStatus), nullable=False, default=OrderStatus.PENDING_PAYMENT, index=True)

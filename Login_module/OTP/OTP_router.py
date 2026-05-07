@@ -46,11 +46,11 @@ def _send_otp_via_msg91(country_code: str, mobile: str, otp: str) -> None:
     Template must include variable named `OTP` (and optionally any others).
     """
     auth_key = (settings.MSG91_AUTH_KEY or "").strip()
-    template_id = (settings.MSG91_OTP_TEMPLATE_ID or "").strip()
+    template_id = (settings.MSG91_TEMPLATE_ID_OTP_LOGIN or "").strip()
     url = (settings.MSG91_FLOW_URL or "").strip() or "https://control.msg91.com/api/v5/flow"
 
     if not auth_key or not template_id:
-        raise RuntimeError("MSG91 is not configured (missing MSG91_AUTH_KEY / MSG91_OTP_TEMPLATE_ID).")
+        raise RuntimeError("MSG91 is not configured (missing MSG91_AUTH_KEY / MSG91_TEMPLATE_ID_OTP_LOGIN).")
 
     # MSG91 expects digits only, typically including country code without '+'
     cc = _digits_only(country_code) or "91"

@@ -973,7 +973,7 @@ def create_thyrocare_order(
                 user_mob = _dec_phone(raw_mob) if raw_mob else ""
             except Exception:
                 user_mob = raw_mob
-            _send_msg91_flow(settings.MSG91_ORDER_PLACED_TEMPLATE_ID, user_mob)
+            _send_msg91_flow(settings.MSG91_TEMPLATE_ID_PHLEBO_COLLECTION_BLOOD, user_mob)
         except Exception:
             logger.warning("Order placed message send failed (ignored).", exc_info=True)
 
@@ -1330,6 +1330,8 @@ def list_failed_thyrocare_bookings(
             "product_name": product.name if product else None,
             "thyrocare_booking_status": oi.thyrocare_booking_status,
             "thyrocare_booking_error": oi.thyrocare_booking_error,
+            "thyrocare_request_payload": oi.thyrocare_request_payload,
+            "thyrocare_response_body": oi.thyrocare_response_body,
             "created_at": str(oi.created_at) if oi.created_at else None,
         })
 
@@ -2097,12 +2099,7 @@ async def thyrocare_webhook(
                     u = None
                     if tracking.user_id:
                         u = db.query(User).filter(User.id == tracking.user_id).first()
-                    if u and u.mobile:
-                        try:
-                            user_mob = _dec_phone(u.mobile)
-                        except Exception:
-                            user_mob = u.mobile
-                        _send_msg91_flow(settings.MSG91_THYROCARE_ARRIVED_TEMPLATE_ID, user_mob)
+                    pass
             except Exception:
                 logger.warning("Thyrocare ARRIVED message send failed (ignored).", exc_info=True)
         else:
@@ -2412,15 +2409,7 @@ async def thyrocare_webhook(
                 (order_status or "").strip().upper() == "ASSIGNED"
                 and (prev_tc_status or "").strip().upper() != "ASSIGNED"
             )
-            if transitioned_to_assigned and tracking and tracking.our_order_id and settings.MSG91_STATUS_ASSIGNED_TEMPLATE_ID:
-                from Orders_module.Order_model import Order as _OrderRow
-                our_order = db.query(_OrderRow).filter(_OrderRow.id == tracking.our_order_id).first()
-                mobile = None
-                if our_order and getattr(our_order, "user", None) and getattr(our_order.user, "mobile", None):
-                    mobile = str(our_order.user.mobile).strip()
-                if mobile:
-                    from Login_module.OTP.msg91_service import send_flow
-                    send_flow("+91", mobile, settings.MSG91_STATUS_ASSIGNED_TEMPLATE_ID, variables=None)
+            pass
         except Exception as e:
             logger.warning("Thyrocare ASSIGNED SMS hook failed (order=%s): %s", thyrocare_order_id, e)
 

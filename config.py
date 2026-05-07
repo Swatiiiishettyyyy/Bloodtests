@@ -34,15 +34,6 @@ class Settings(BaseSettings):
     ALLOW_OTP_BYPASS: bool = False
     OTP_BYPASS_CODE: str = "1234"
 
-    # MSG91 Flow (optional) - for sending OTP via SMS
-    MSG91_AUTH_KEY: str = ""
-    MSG91_OTP_TEMPLATE_ID: str = ""
-    MSG91_ORDER_PLACED_TEMPLATE_ID: str = ""
-    MSG91_STATUS_ASSIGNED_TEMPLATE_ID: str = ""
-    MSG91_FLOW_URL: str = "https://control.msg91.com/api/v5/flow/"
-    MSG91_SHORT_URL: str = "1"  # "1"=On, "0"=Off
-    MSG91_REALTIME_RESPONSE: str = "1"  # "1"=wait for delivery status, "0"=no wait
-    
     # Session management
     MAX_ACTIVE_SESSIONS: int = 4  # Max 4 active sessions per user
     
@@ -67,14 +58,20 @@ class Settings(BaseSettings):
     TWILIO_AUTH_TOKEN: str = ""
     TWILIO_VERIFY_SERVICE_SID: str = ""
 
-    # MSG91 (Flow API) - OTP SMS
+    # MSG91 (Flow API)
     MSG91_FLOW_URL: str = "https://control.msg91.com/api/v5/flow"
     MSG91_AUTH_KEY: str = ""
-    MSG91_OTP_TEMPLATE_ID: str = ""
+    MSG91_SHORT_URL: str = "0"  # "1"=On, "0"=Off — keep Off: URL shortening changes content and breaks DLT template matching
+    MSG91_REALTIME_RESPONSE: str = "1"  # "1"=wait for delivery status, "0"=no wait
 
-    # MSG91 (Flow API) - transactional messages
-    MSG91_ORDER_PLACED_TEMPLATE_ID: str = ""
-    MSG91_THYROCARE_ARRIVED_TEMPLATE_ID: str = ""
+    # MSG91 template IDs
+    MSG91_TEMPLATE_ID_OTP_LOGIN: str = ""
+    MSG91_TEMPLATE_ID_WELCOME_FIRST_TIME: str = "69f44d91ddb266e8b80172a3"
+    MSG91_TEMPLATE_ID_REPORT_READY: str = "69f44dbf9fe3b2ab780d5982"
+    MSG91_TEMPLATE_ID_PHLEBO_COLLECTION_BLOOD: str = "69f44e109441563ce605a0e2"
+    MSG91_TEMPLATE_ID_ORDER_CONFIRMATION: str = "69f44e87b3f8586ea30e35b2"
+    MSG91_TEMPLATE_ID_PHLEBO_COLLECTION_GENETIC: str = "69f44ef4e1ffe4db810f7622"
+    MSG91_TEMPLATE_ID_POST_ORDER_SURVEY: str = "69f4543bc4a9817cd6099782"
 
     # Firebase FCM - path to service account JSON; empty = skip FCM send (notifications still stored in DB)
     FIREBASE_SERVICE_ACCOUNT_PATH: str = ""
@@ -84,6 +81,7 @@ class Settings(BaseSettings):
     # Invoice Generation & Sending
     INVOICE_SERVICE_ACCOUNT_PATH: str = "invoice generation/billing.json"
     INVOICE_SENDER_EMAIL: str = "billing@nucleotide.life"
+    INFO_SENDER_EMAIL: str = "info@nucleotide.life"
     INVOICE_COMPANY_NAME: str = "Nucleotide Healthcare Pvt Ltd"
     INVOICE_COMPANY_ADDRESS: str = "Bangalore, Karnataka, India"
     INVOICE_PAN_NUMBER: str = "AADCE5479M"
@@ -95,7 +93,7 @@ class Settings(BaseSettings):
     # Comma-separated BCC addresses for invoice emails, e.g. "a@x.com,b@x.com"
     INVOICE_BCC_EMAILS: str = ""
     # Public S3/CDN URL for the delivery-boy GIF used in the order confirmation email
-    ORDER_CONFIRMATION_GIF_URL: str = ""
+    ORDER_CONFIRMATION_GIF_URL: str = "https://nucleotide-email-template.s3.ap-south-1.amazonaws.com/Delivery+Boy.gif"
 
     # Thyrocare Configuration
     THYROCARE_BASE_URL: str = "https://api-sandbox.thyrocare.com"
@@ -130,3 +128,4 @@ settings.ACCESS_TOKEN_EXPIRE_SECONDS = settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
 # Fallback CSRF_SECRET_KEY if not set (use SECRET_KEY with prefix)
 if not settings.CSRF_SECRET_KEY:
     settings.CSRF_SECRET_KEY = f"csrf_{settings.SECRET_KEY}"
+

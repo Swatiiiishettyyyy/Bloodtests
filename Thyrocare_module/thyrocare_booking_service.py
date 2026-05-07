@@ -368,6 +368,9 @@ def _book_group(db: Session, order: Order, items: List[OrderItem], service: Thyr
     )
     print(f"[THYROCARE BOOKING] Order: {order.order_number} | Sending payload:\n{__import__('json').dumps(order_payload, indent=2, default=str)}")
 
+    for oi in items:
+        oi.thyrocare_request_payload = order_payload
+
     response = _requests.post(
         f"{settings.THYROCARE_BASE_URL}/partners/v1/orders",
         json=order_payload,
@@ -375,6 +378,10 @@ def _book_group(db: Session, order: Order, items: List[OrderItem], service: Thyr
     )
     print(f"[THYROCARE BOOKING] Order: {order.order_number} | Response status: {response.status_code}")
     print(f"[THYROCARE BOOKING] Order: {order.order_number} | Response body: {response.text}")
+
+    for oi in items:
+        oi.thyrocare_response_body = response.text
+
     response.raise_for_status()
     result = response.json()
 
