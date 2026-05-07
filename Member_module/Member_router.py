@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, File, status, Cookie, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from typing import List, Optional
 from datetime import datetime
 import uuid
@@ -44,10 +45,25 @@ def _member_order_and_flag_fields(db: Session, member_id: int) -> dict:
         get_latest_order_for_member,
         get_latest_report_ready_order_for_member,
     )
-    participant = get_participant_by_member_id(db, member_id)
-    has_taken_genetic_test = participant.has_taken_genetic_test if participant else False
-    latest = get_latest_order_for_member(db, member_id)
-    gene_report = get_latest_report_ready_order_for_member(db, member_id)
+    fallback = {
+        "has_taken_genetic_test": False,
+        "latest_order_no": None,
+        "latest_order_status": None,
+        "gene_report_order_no": None,
+        "gene_report_status": None,
+    }
+    try:
+        participant = get_participant_by_member_id(db, member_id)
+        has_taken_genetic_test = participant.has_taken_genetic_test if participant else False
+        latest = get_latest_order_for_member(db, member_id)
+        gene_report = get_latest_report_ready_order_for_member(db, member_id)
+    except (OperationalError, SQLAlchemyError) as exc:
+        db.rollback()
+        logger.warning(
+            "Skipping member order summary because order query failed | "
+            f"Member ID: {member_id} | Error: {exc}"
+        )
+        return fallback
     return {
         "has_taken_genetic_test": has_taken_genetic_test,
         "latest_order_no": latest["order_number"] if latest else None,
@@ -134,7 +150,7 @@ def save_member_api(
     user = Depends(get_current_user),
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_scheme),
     access_token_cookie: Optional[str] = Cookie(None, alias="access_token"),
-    response: Response = None,
+    fastapi_response: Response = None,
 ):
     """
     Create a new member (requires authentication).
@@ -185,11 +201,31 @@ def save_member_api(
                 to=member.email,
                 name=member.name or "there",
                 service_account_file=str(Path(__file__).parent.parent / settings.INVOICE_SERVICE_ACCOUNT_PATH),
-                sender_email=settings.INVOICE_SENDER_EMAIL,
+                sender_email=settings.INFO_SENDER_EMAIL,
             )
             logger.info(f"Welcome email sent to {member.email} for new member ID {member.id} (user {user.id})")
         except Exception as e:
             logger.error(f"Welcome email failed for member {member.id} (user {user.id}): {e}", exc_info=True)
+
+    # Send welcome SMS when the first Self profile is saved
+    if is_first_member and member.is_self_profile and member.mobile:
+        try:
+            from Login_module.OTP.msg91_service import send_flow
+            _mobile = decrypt_phone(member.mobile)
+            if _mobile and settings.MSG91_WELCOME_SMS_TEMPLATE_ID:
+                send_flow(
+                    country_code="+91",
+                    mobile=_mobile,
+                    template_id=settings.MSG91_WELCOME_SMS_TEMPLATE_ID,
+                    variables={
+                        "name": user.name or member.name or "there",
+                        "Name": user.name or member.name or "there",
+                        "NAME": user.name or member.name or "there",
+                    },
+                )
+                logger.info(f"Welcome SMS sent to {_mobile} for new member ID {member.id} (user {user.id})")
+        except Exception as e:
+            logger.error(f"Welcome SMS failed for member {member.id} (user {user.id}): {e}", exc_info=True)
 
     message = "Member saved successfully."
     if family_status:
@@ -227,7 +263,7 @@ def save_member_api(
         gene_report_order_no=fields["gene_report_order_no"],
         gene_report_status=fields["gene_report_status"],
     )
-    response = {
+    response_body = {
         "status": "success",
         "message": message,
         "data": member_data
@@ -261,8 +297,6 @@ def save_member_api(
             device_platform = payload.get("device_platform", "unknown")
             
             if not session_id:
-                import logging
-                logger = logging.getLogger(__name__)
                 logger.warning(f"No session_id in token for user {user.id} when creating first member")
             else:
                 # generate_token_with_member now validates session internally
@@ -273,12 +307,12 @@ def save_member_api(
                     device_platform=device_platform,
                     selected_member_id=member.id
                 )
-                response["token"] = new_token
-                response["token_type"] = "Bearer"
+                response_body["token"] = new_token
+                response_body["token_type"] = "Bearer"
 
                 # For web clients, also update the HttpOnly access_token cookie
-                if is_web_request and response is not None:
-                    response.set_cookie(
+                if is_web_request and fastapi_response is not None:
+                    fastapi_response.set_cookie(
                         key="access_token",
                         value=new_token,
                         path="/",
@@ -288,20 +322,13 @@ def save_member_api(
                         max_age=settings.ACCESS_TOKEN_EXPIRE_SECONDS,
                     )
         except HTTPException:
-            # Re-raise HTTP exceptions (like invalid token, invalid session)
-            # Don't fail member creation, but log the error
-            import logging
-            logger = logging.getLogger(__name__)
             logger.warning(f"HTTP error generating token for first member (user {user.id}, member {member.id})", exc_info=True)
             # Continue without token - member is still created successfully
         except Exception as e:
-            # Log error but don't fail the member creation
-            import logging
-            logger = logging.getLogger(__name__)
             logger.error(f"Error generating token for first member (user {user.id}, member {member.id}): {str(e)}", exc_info=True)
             # Continue without token - member is still created successfully
 
-    return response
+    return response_body
 
 # Update existing member
 @router.put("/edit/{member_id}", response_model=MemberResponse)

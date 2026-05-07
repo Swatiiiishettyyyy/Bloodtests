@@ -34,6 +34,15 @@ class Settings(BaseSettings):
     ALLOW_OTP_BYPASS: bool = False
     OTP_BYPASS_CODE: str = "1234"
 
+    # MSG91 Flow (optional) - for sending OTP via SMS
+    MSG91_AUTH_KEY: str = ""
+    MSG91_OTP_TEMPLATE_ID: str = ""
+    MSG91_ORDER_PLACED_TEMPLATE_ID: str = ""
+    MSG91_STATUS_ASSIGNED_TEMPLATE_ID: str = ""
+    MSG91_FLOW_URL: str = "https://control.msg91.com/api/v5/flow/"
+    MSG91_SHORT_URL: str = "1"  # "1"=On, "0"=Off
+    MSG91_REALTIME_RESPONSE: str = "1"  # "1"=wait for delivery status, "0"=no wait
+    
     # Session management
     MAX_ACTIVE_SESSIONS: int = 4  # Max 4 active sessions per user
     
@@ -61,17 +70,11 @@ class Settings(BaseSettings):
     # MSG91 (Flow API)
     MSG91_FLOW_URL: str = "https://control.msg91.com/api/v5/flow"
     MSG91_AUTH_KEY: str = ""
-    MSG91_SHORT_URL: str = "0"  # "1"=On, "0"=Off — keep Off: URL shortening changes content and breaks DLT template matching
-    MSG91_REALTIME_RESPONSE: str = "1"  # "1"=wait for delivery status, "0"=no wait
+    MSG91_OTP_TEMPLATE_ID: str = ""
 
-    # MSG91 template IDs
-    MSG91_TEMPLATE_ID_OTP_LOGIN: str = ""
-    MSG91_TEMPLATE_ID_WELCOME_FIRST_TIME: str = "69f44d91ddb266e8b80172a3"
-    MSG91_TEMPLATE_ID_REPORT_READY: str = "69f44dbf9fe3b2ab780d5982"
-    MSG91_TEMPLATE_ID_PHLEBO_COLLECTION_BLOOD: str = "69f44e109441563ce605a0e2"
-    MSG91_TEMPLATE_ID_ORDER_CONFIRMATION: str = "69f44e87b3f8586ea30e35b2"
-    MSG91_TEMPLATE_ID_PHLEBO_COLLECTION_GENETIC: str = "69f44ef4e1ffe4db810f7622"
-    MSG91_TEMPLATE_ID_POST_ORDER_SURVEY: str = "69f4543bc4a9817cd6099782"
+    # MSG91 (Flow API) - transactional messages
+    MSG91_ORDER_PLACED_TEMPLATE_ID: str = ""
+    MSG91_THYROCARE_ARRIVED_TEMPLATE_ID: str = ""
 
     # Firebase FCM - path to service account JSON; empty = skip FCM send (notifications still stored in DB)
     FIREBASE_SERVICE_ACCOUNT_PATH: str = ""

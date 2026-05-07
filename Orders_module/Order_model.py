@@ -60,6 +60,8 @@ class Order(Base):
     discount = Column(Float, default=0.0)
     coupon_code = Column(String(50), nullable=True, index=True)  # Applied coupon code (None if no coupon)
     coupon_discount = Column(Float, default=0.0)  # Discount from coupon
+    blood_test_coupon_code   = Column(String(50), nullable=True)
+    blood_test_coupon_amount = Column(Float, default=0.0)
     total_amount = Column(Float, nullable=False)  # Final amount paid
     
     # Payment status (denormalized for quick queries - actual payment data is in payments table)

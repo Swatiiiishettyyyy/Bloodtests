@@ -47,6 +47,10 @@ class PendingCheckout(Base):
     coupon_code = Column(String(50), nullable=True)
     coupon_discount = Column(Float, nullable=False, default=0.0)
 
+    # Blood test coupon applied at checkout time (separate from genetic coupon)
+    blood_test_coupon_code   = Column(String(50), nullable=True)
+    blood_test_coupon_amount = Column(Float, nullable=False, default=0.0)
+
     created_at = Column(DateTime(timezone=True), default=now_ist, nullable=False)
 
     # Auto-expire after 24 h — stale rows can be safely purged without any order-number impact

@@ -9,7 +9,7 @@ def send_welcome_email(
     to: str,
     name: str,
     service_account_file: str,
-    sender_email: str = "billing@nucleotide.life",
+    sender_email: str = "info@nucleotide.life",
 ) -> dict:
     invoice_gen_path = str(Path(__file__).parent)
     if invoice_gen_path not in sys.path:

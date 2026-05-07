@@ -37,6 +37,7 @@ from .Refresh_token_crud import (
     revoke_all_user_token_families,
     get_refresh_token_by_family_and_hash,
     has_active_refresh_token_in_family,
+    get_active_refresh_token_in_family,
 )
 from Login_module.Token.Token_audit_crud import log_token_event
 from config import settings
@@ -372,52 +373,68 @@ def refresh_token(
             record_failed_refresh_attempt(session_id)
             
             # Check if there is still an active (non-revoked, unexpired) token in this family
-            has_active = has_active_refresh_token_in_family(db, token_family_id)
-            
-            if has_active:
-                # SECURITY INCIDENT: Token reuse detected (old token used while a newer one is still active)
-                logger.error(
-                    f"SECURITY: Token reuse detected | "
-                    f"User ID: {user_id} | Session ID: {session_id} | "
-                    f"Family ID: {token_family_id} | IP: {client_ip}"
-                )
-                
-                # Revoke entire token family and terminate session
-                revoke_token_family(db, token_family_id, "Token reuse detected")
-                
-                session = get_device_session(db, session_id)
-                if session and session.is_active:
-                    deactivate_session(
+            active_token = get_active_refresh_token_in_family(db, token_family_id)
+
+            if active_token:
+                # There is a newer active token in this family — the submitted token was rotated.
+                # Check whether rotation happened recently (proactive refresh reached backend but
+                # the frontend never received the response, leaving the old token in localStorage).
+                # Grace period: 120 s from when the replacement token was created.
+                GRACE_PERIOD_SECONDS = 120
+                elapsed = (now_ist() - active_token.created_at).total_seconds()
+
+                if elapsed < GRACE_PERIOD_SECONDS:
+                    # Recent rotation — almost certainly a background-refresh partial success.
+                    # Recover gracefully: swap in the active token and continue normal rotation.
+                    logger.warning(
+                        f"Token refresh: partial rotation recovered within grace period "
+                        f"({elapsed:.1f}s < {GRACE_PERIOD_SECONDS}s) | "
+                        f"User ID: {user_id} | Session ID: {session_id} | "
+                        f"Family ID: {token_family_id} | IP: {client_ip}"
+                    )
+                    db_refresh_token = active_token
+                else:
+                    # Old rotation — a truly different device or a genuine reuse attempt.
+                    logger.error(
+                        f"SECURITY: Token reuse detected | "
+                        f"User ID: {user_id} | Session ID: {session_id} | "
+                        f"Family ID: {token_family_id} | IP: {client_ip}"
+                    )
+
+                    revoke_token_family(db, token_family_id, "Token reuse detected")
+
+                    session = get_device_session(db, session_id)
+                    if session and session.is_active:
+                        deactivate_session(
+                            db=db,
+                            session_id=session_id,
+                            reason="Session terminated due to token reuse",
+                            ip_address=client_ip,
+                            user_agent=user_agent,
+                            correlation_id=correlation_id
+                        )
+
+                    log_token_event(
                         db=db,
+                        event_type="TOKEN_REUSE_DETECTED",
+                        user_id=user_id,
                         session_id=session_id,
-                        reason="Session terminated due to token reuse",
+                        token_family_id=token_family_id,
+                        reason=f"Token reuse detected. IP: {client_ip}",
                         ip_address=client_ip,
                         user_agent=user_agent,
                         correlation_id=correlation_id
                     )
-                
-                log_token_event(
-                    db=db,
-                    event_type="TOKEN_REUSE_DETECTED",
-                    user_id=user_id,
-                    session_id=session_id,
-                    token_family_id=token_family_id,
-                    reason=f"Token reuse detected. IP: {client_ip}",
-                    ip_address=client_ip,
-                    user_agent=user_agent,
-                    correlation_id=correlation_id
-                )
-                
-                # Clear cookies when token reuse detected (security incident)
-                _clear_token_cookies(
-                    response,
-                    domain=settings.COOKIE_DOMAIN if settings.COOKIE_DOMAIN else None,
-                    secure=settings.COOKIE_SECURE
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail={"error_code": "TOKEN_REUSE_DETECTED", "detail": "Security incident detected. Please log in again."}
-                )
+
+                    _clear_token_cookies(
+                        response,
+                        domain=settings.COOKIE_DOMAIN if settings.COOKIE_DOMAIN else None,
+                        secure=settings.COOKIE_SECURE
+                    )
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail={"error_code": "TOKEN_REUSE_DETECTED", "detail": "Security incident detected. Please log in again."}
+                    )
             else:
                 # No active tokens in this family - treat as generic invalid/expired token
                 log_token_event(
@@ -684,6 +701,7 @@ def refresh_token(
             return RefreshTokenResponse(
                 status="success",
                 message="Token refreshed successfully",
+                access_token=new_access_token,
                 csrf_token=csrf_token,
                 expires_in=settings.ACCESS_TOKEN_EXPIRE_SECONDS
             )

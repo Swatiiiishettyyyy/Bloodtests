@@ -445,6 +445,30 @@ def create_order(
             else:
                 coupon_discount = 0.0
         
+        # Blood test coupon (separate system — does not mix with genetic coupon)
+        from Cart_module.blood_test_coupon_service import (
+            get_applied_coupon as bt_get_applied_coupon,
+            validate_and_calculate_discount as bt_validate_discount,
+        )
+        bt_applied_coupon = bt_get_applied_coupon(db, current_user.id)
+        blood_test_coupon_discount = 0.0
+        blood_test_coupon_code_used = None
+
+        if bt_applied_coupon:
+            bt_subtotal = sum(
+                float(grouped_items[gk][0].thyrocare_product.thyrocare_price or 0) * len(grouped_items[gk])
+                for gk in grouped_items
+                if grouped_items[gk]
+                and grouped_items[gk][0].product_type == "blood_test"
+                and grouped_items[gk][0].thyrocare_product
+            )
+            bt_coupon_obj, bt_discount, bt_err = bt_validate_discount(
+                db, bt_applied_coupon.coupon_code, current_user.id, bt_subtotal
+            )
+            if bt_coupon_obj and not bt_err:
+                blood_test_coupon_discount = bt_discount
+                blood_test_coupon_code_used = bt_applied_coupon.coupon_code
+
         # Calculate product discount (per product group, not per cart item row)
         processed_groups = set()
         product_discount = 0.0
@@ -473,7 +497,7 @@ def create_order(
         # Note: subtotal already uses SpecialPrice (product discount is already applied)
         # So we only subtract coupon_discount, not product_discount
         # This matches the corrected cart calculation: grand_total = subtotal_amount + delivery_charge - coupon_amount
-        total_amount = subtotal + delivery_charge - coupon_discount
+        total_amount = subtotal + delivery_charge - coupon_discount - blood_test_coupon_discount
         total_amount = max(0.0, total_amount)  # Ensure not negative
 
         # Get all cart item IDs
@@ -516,6 +540,8 @@ def create_order(
             # Sync coupon and totals in case coupon was applied/changed since first attempt
             existing_order.coupon_code = applied_coupon.coupon_code if applied_coupon and coupon_discount > 0 else None
             existing_order.coupon_discount = coupon_discount
+            existing_order.blood_test_coupon_code   = blood_test_coupon_code_used
+            existing_order.blood_test_coupon_amount = blood_test_coupon_discount
             existing_order.total_amount = total_amount
             
             # Create new payment record for retry
@@ -604,6 +630,8 @@ def create_order(
                 placed_by_member_id=placed_by_member_id,
                 coupon_code=applied_coupon.coupon_code if applied_coupon and coupon_discount > 0 else None,
                 coupon_discount=coupon_discount,
+                blood_test_coupon_code=blood_test_coupon_code_used,
+                blood_test_coupon_amount=blood_test_coupon_discount,
             )
             logger.info(
                 f"PendingCheckout {pending.id} created for user {current_user.id} "

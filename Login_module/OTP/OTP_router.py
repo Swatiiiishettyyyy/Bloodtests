@@ -630,6 +630,7 @@ def verify_otp(req: VerifyOTPRequest, request: Request, db: Session = Depends(ge
                 refresh_token=refresh_token,
                 token_type="Bearer",
                 expires_in=settings.ACCESS_TOKEN_EXPIRE_SECONDS,
+                refresh_expires_in=int(settings.REFRESH_TOKEN_EXPIRE_DAYS_MOBILE * 24 * 60 * 60),
                 is_new_user=is_new_user
             )
             

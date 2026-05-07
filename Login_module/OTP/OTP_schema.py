@@ -87,7 +87,8 @@ class VerifiedData(BaseModel):
     access_token: Optional[str] = None  # For mobile only - web uses cookies
     refresh_token: Optional[str] = None  # For mobile only - web uses cookies
     token_type: Optional[str] = None  # For mobile only
-    expires_in: Optional[int] = None  # For mobile only
+    expires_in: Optional[int] = None  # For mobile only - access token expiry in seconds
+    refresh_expires_in: Optional[int] = None  # For mobile only - refresh token expiry in seconds
     csrf_token: Optional[str] = None  # For web only
     is_new_user: bool = False  # True if user was just created during this OTP verification
 

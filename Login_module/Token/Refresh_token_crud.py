@@ -207,6 +207,19 @@ def has_active_refresh_token_in_family(
     return active is not None
 
 
+def get_active_refresh_token_in_family(db: Session, token_family_id: str):
+    """Returns the active (non-revoked, non-expired) RefreshToken in the family, or None."""
+    return (
+        db.query(RefreshToken)
+        .filter(
+            RefreshToken.token_family_id == token_family_id,
+            RefreshToken.is_revoked == False,
+            RefreshToken.expires_at > now_ist(),
+        )
+        .first()
+    )
+
+
 def cleanup_expired_tokens(db: Session) -> int:
     """
     Clean up expired refresh tokens (optional maintenance task).

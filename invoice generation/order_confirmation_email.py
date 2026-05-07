@@ -24,7 +24,7 @@ def send_order_confirmation_email(
     customer_name: str,
     items: list,
     service_account_file: str,
-    sender_email: str = "billing@nucleotide.life",
+    sender_email: str = "info@nucleotide.life",
     gif_url: str = "",
     order_number: str = "",
 ) -> dict:
